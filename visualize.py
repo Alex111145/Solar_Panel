@@ -34,14 +34,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_multi_gpu")
 VIS_OUTPUT_DIR = os.path.join(BASE_DIR, "risultati_visivi") 
 
-SOGLIA_DETECTION = 0.25  
+SOGLIA_DETECTION = 0.35 
 NMS_THRESH = 0.40           
 MERGE_DIST_METERS = 0.8  
 
 DATASET_FOLDER_NAME = "solar_datasets"
-# CARTELLA VALID: Usata come sorgente per le patch
-VAL_JSON = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid", "_annotations.coco.json")
-VAL_IMGS = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
+# CARTELLA Test: Usata come sorgente per le patch
+VAL_JSON = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "tewst", "_annotations.coco.json")
+VAL_IMGS = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "test")
 
 YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
 checkpoints = glob.glob(os.path.join(OUTPUT_DIR, "model_*.pth"))
@@ -112,7 +112,7 @@ def setup_cfg():
 # ==============================================================================
 
 def main():
-    # Carica solo i file dalla cartella VALID
+    # Carica solo i file dalla cartella test
     all_files = sorted(glob.glob(os.path.join(VAL_IMGS, "*.jpg")) + glob.glob(os.path.join(VAL_IMGS, "*.JPG")))
     os.makedirs(VIS_OUTPUT_DIR, exist_ok=True)
     
@@ -120,7 +120,7 @@ def main():
         print(f"❌ Nessun file trovato in {VAL_IMGS}. Verifica il percorso.")
         sys.exit(1)
 
-    print(f"\n📂 Analisi di {len(all_files)} patch dalla cartella VALID...")
+    print(f"\n📂 Analisi di {len(all_files)} patch dalla cartella test...")
     try:
         n_input = input("👉 Quante patch vuoi analizzare? (Invio per tutte): ")
         n_choice = int(n_input) if n_input.strip() else 0
@@ -131,9 +131,9 @@ def main():
     cfg = setup_cfg()
     predictor = DefaultPredictor(cfg)
     
-    if "solar_val" not in DatasetCatalog.list():
-        register_coco_instances("solar_val", {}, VAL_JSON, VAL_IMGS)
-    metadata = MetadataCatalog.get("solar_val")
+    if "solar_test" not in DatasetCatalog.list():
+        register_coco_instances("solar_test", {}, VAL_JSON, VAL_IMGS)
+    metadata = MetadataCatalog.get("solar_test")
     
     # Inizializzazione Geografica
     try:

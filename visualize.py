@@ -1,143 +1,224 @@
 #!/usr/bin/env python
 import os
-import cv2
-import random
-import torch
-import warnings
-import json
 
+# Blocca i warning di OpenCV per i tag TIFF sconosciuti prima di caricare cv2
+os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
+
+import cv2
+import torch
+import re
+import glob
+import math
+import simplekml
+import warnings
+import numpy as np
+import rasterio
+import sys
+from pyproj import Transformer
+
+# --- CONFIGURAZIONE AMBIENTE ---
 warnings.filterwarnings("ignore")
 
 from detectron2.config import get_cfg
 from detectron2.engine import DefaultPredictor
-from detectron2.utils.visualizer import Visualizer, ColorMode
+from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.data.datasets import register_coco_instances
 from maskdino import add_maskdino_config
 from detectron2.layers import nms
 
 # ==============================================================================
-# --- CONFIGURAZIONE ---
+# ⚙️ CONFIGURAZIONE PARAMETRI
 # ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_FOLDER_NAME = "solar_datasets" 
+OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_multi_gpu")
+VIS_OUTPUT_DIR = os.path.join(BASE_DIR, "risultati_visivi") 
 
-VAL_JSON   = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid", "_annotations.coco.json")
-VAL_IMGS   = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_fixed")
+SOGLIA_DETECTION = 0.25  
+NMS_THRESH = 0.40           
+MERGE_DIST_METERS = 0.8  
 
-# Cerca prima il modello finale, altrimenti l'ultimo checkpoint
-if os.path.exists(os.path.join(OUTPUT_DIR, "model_final.pth")):
-    WEIGHTS_FILE = os.path.join(OUTPUT_DIR, "model_final.pth")
-else:
-    # Se non trovi model_final, metti qui il nome esatto del tuo file .pth (es. model_0005999.pth)
-    WEIGHTS_FILE = os.path.join(OUTPUT_DIR, "model_0005999.pth")
+DATASET_FOLDER_NAME = "solar_datasets"
+# CARTELLA VALID: Usata come sorgente per le patch
+VAL_JSON = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid", "_annotations.coco.json")
+VAL_IMGS = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
 
-# --- PARAMETRI DI PULIZIA (AGGIORNATI) ---
-# Abbassiamo drasticamente per vedere cosa "pensa" il modello
-VIS_SCORE_THRESH = 0.15  # Mostra oggetti anche se la sicurezza è solo del 15%
-NMS_THRESH = 0.50        # Meno aggressivo sulle sovrapposizioni
+YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
+checkpoints = glob.glob(os.path.join(OUTPUT_DIR, "model_*.pth"))
+WEIGHTS_FILE = max(checkpoints, key=os.path.getctime) if checkpoints else os.path.join(OUTPUT_DIR, "model_final.pth")
 
-NUM_SAMPLES = 15          
+ORIGINAL_MOSAIC_PATH = os.path.join(BASE_DIR, "ortomosaico.tif")
+OUTPUT_MOSAIC_MARKED = "Mosaico_Punti_Rilevati.jpg"
 
-def get_classes_from_json(json_path):
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    categories = sorted(data.get('categories', []), key=lambda x: x['id'])
-    return [cat['name'] for cat in categories]
+NUM_CLASSES = 1
+DOT_RADIUS_MOSAIC = 6  
 
-def setup_cfg(num_classes):
+# ==============================================================================
+# 🛠️ FUNZIONI TECNICHE
+# ==============================================================================
+
+def get_geo_tools(tif_path):
+    """Estrae i metadati geografici reali dal TIF."""
+    with rasterio.open(tif_path) as src:
+        affine = src.transform
+        crs = src.crs
+    transformer = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    return affine, transformer
+
+def get_mask_center_precise(mask, box):
+    mask_uint8 = (mask.astype("uint8") * 255)
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) > 0:
+        c = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(c)
+        (center_x, center_y), _, _ = rect
+        return center_x, center_y
+    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+
+def filtra_punti_unici(detections, soglia_metri):
+    unique_panels = []
+    for p in detections:
+        found = False
+        for up in unique_panels:
+            dist = math.sqrt((p['lat']-up['lat'])**2 + (p['lon']-up['lon'])**2) * 111000
+            if dist < soglia_metri:
+                n = up['count']
+                up['lat'] = (up['lat']*n + p['lat'])/(n+1)
+                up['lon'] = (up['lon']*n + p['lon'])/(n+1)
+                up['gx'] = (up['gx']*n + p['gx'])/(n+1)
+                up['gy'] = (up['gy']*n + p['gy'])/(n+1)
+                up['count'] += 1
+                found = True
+                break
+        if not found:
+            unique_panels.append({**p, 'count': 1})
+    return unique_panels
+
+def setup_cfg():
     cfg = get_cfg()
-    cfg.set_new_allowed(True) 
+    cfg.set_new_allowed(True)
     add_maskdino_config(cfg)
-    
-    YAML_PATH = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
-    cfg.merge_from_file(YAML_PATH)
-    
-    cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
-    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = num_classes
-    cfg.MODEL.MaskDINO.NUM_CLASSES = num_classes
-    
+    cfg.merge_from_file(YAML_CONFIG)
     cfg.MODEL.WEIGHTS = WEIGHTS_FILE
-    # Impostiamo a 0 nel config per non far filtrare nulla a Detectron2, filtriamo noi dopo
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.00 
     cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    cfg.INPUT.MASK_FORMAT = "bitmask"
-    
-    cfg.MODEL.MaskDINO.DN = "no"
-    cfg.MODEL.MaskDINO.TEST.INSTANCE_ON = True
-    cfg.MODEL.MaskDINO.TEST.SEMANTIC_ON = False
-    cfg.MODEL.MaskDINO.TEST.PANOPTIC_ON = False
-    
-    cfg.freeze()
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = NUM_CLASSES
+    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = NUM_CLASSES
+    cfg.MODEL.MaskDINO.NUM_CLASSES = NUM_CLASSES
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = SOGLIA_DETECTION
     return cfg
 
+# ==============================================================================
+# 🚀 MAIN
+# ==============================================================================
+
 def main():
-    print(f"\n🚀 AVVIO VISUALIZZAZIONE (Soglia bassa: {VIS_SCORE_THRESH})")
-    print(f"--- Checkpoint: {os.path.basename(WEIGHTS_FILE)}")
-
-    CLASS_NAMES = get_classes_from_json(VAL_JSON)
-    num_classes = len(CLASS_NAMES)
+    # Carica solo i file dalla cartella VALID
+    all_files = sorted(glob.glob(os.path.join(VAL_IMGS, "*.jpg")) + glob.glob(os.path.join(VAL_IMGS, "*.JPG")))
+    os.makedirs(VIS_OUTPUT_DIR, exist_ok=True)
     
-    DATASET_NAME = "solar_val_inference"
-    if DATASET_NAME in DatasetCatalog.list():
-        DatasetCatalog.remove(DATASET_NAME)
-    register_coco_instances(DATASET_NAME, {}, VAL_JSON, VAL_IMGS)
-    
-    metadata = MetadataCatalog.get(DATASET_NAME)
-    metadata.thing_classes = CLASS_NAMES
+    if not all_files:
+        print(f"❌ Nessun file trovato in {VAL_IMGS}. Verifica il percorso.")
+        sys.exit(1)
 
-    if not os.path.exists(WEIGHTS_FILE):
-        print(f"❌ ERRORE: Pesi non trovati in {WEIGHTS_FILE}")
-        return
+    print(f"\n📂 Analisi di {len(all_files)} patch dalla cartella VALID...")
+    try:
+        n_input = input("👉 Quante patch vuoi analizzare? (Invio per tutte): ")
+        n_choice = int(n_input) if n_input.strip() else 0
+        files_to_process = all_files[:n_choice] if n_choice > 0 else all_files
+    except EOFError:
+        files_to_process = all_files
 
-    cfg = setup_cfg(num_classes)
+    cfg = setup_cfg()
     predictor = DefaultPredictor(cfg)
     
-    vis_output = os.path.join(BASE_DIR, "risultati_visivi")
-    os.makedirs(vis_output, exist_ok=True)
+    if "solar_val" not in DatasetCatalog.list():
+        register_coco_instances("solar_val", {}, VAL_JSON, VAL_IMGS)
+    metadata = MetadataCatalog.get("solar_val")
     
-    dataset_dicts = DatasetCatalog.get(DATASET_NAME)
-    samples = random.sample(dataset_dicts, min(NUM_SAMPLES, len(dataset_dicts)))
+    # Inizializzazione Geografica
+    try:
+        affine, geo_transformer = get_geo_tools(ORIGINAL_MOSAIC_PATH)
+    except Exception as e:
+        print(f"❌ Errore caricamento TIF: {e}")
+        sys.exit(1)
 
-    print(f"--- Analisi di {len(samples)} immagini ---\n")
+    raw_detections = []
 
-    for i, d in enumerate(samples):
-        img = cv2.imread(d["file_name"])
+    print("-" * 60)
+    for i, path in enumerate(files_to_process):
+        fname = os.path.basename(path)
+        match = re.search(r"tile_col_(\d+)_row_(\d+)", fname)
+        if not match: continue
+        off_x, off_y = int(match.group(1)), int(match.group(2))
+
+        img = cv2.imread(path)
         outputs = predictor(img)
-        
         instances = outputs["instances"].to("cpu")
         
-        # --- DEBUG: VEDIAMO I PUNTEGGI REALI ---
+        # Filtro soglia esplicito
+        instances = instances[instances.scores > SOGLIA_DETECTION]
+        
         if len(instances) > 0:
+            # Filtro NMS
+            keep_nms = nms(instances.pred_boxes.tensor, instances.scores, NMS_THRESH)
+            instances = instances[keep_nms]
+            
+            # Log terminale
             max_score = instances.scores.max().item()
-            print(f"   > Max Score rilevato dal modello: {max_score:.4f}")
+            print(f"📸 [{i+1}/{len(files_to_process)}] {fname} | Pannelli: {len(instances)} | Accuracy Max: {max_score:.2%}")
+
+            masks_np = instances.pred_masks.numpy()
+            boxes_np = instances.pred_boxes.tensor.numpy()
+            scores_list = instances.scores.tolist()
+
+            for j in range(len(instances)):
+                cx, cy = get_mask_center_precise(masks_np[j], boxes_np[j])
+                gx, gy = off_x + cx, off_y + cy
+                
+                proj_x, proj_y = affine * (gx, gy)
+                lon, lat = geo_transformer.transform(proj_x, proj_y)
+                raw_detections.append({'lat': lat, 'lon': lon, 'gx': gx, 'gy': gy})
+
+            # Visualizzazione con label accuracy
+            v = Visualizer(img[:, :, ::-1], metadata=metadata)
+            labels = [f"{s:.1%}" for s in scores_list]
+            out = v.overlay_instances(masks=instances.pred_masks, labels=labels, alpha=0.4)
+            cv2.imwrite(os.path.join(VIS_OUTPUT_DIR, f"res_{fname}"), out.get_image()[:, :, ::-1])
         else:
-            print(f"   > Nessuna istanza rilevata (strano per MaskDINO)")
+            print(f"📸 [{i+1}/{len(files_to_process)}] {fname} | Nessun pannello sopra soglia {SOGLIA_DETECTION}")
 
-        # 1. Filtro Score
-        keep_idxs = instances.scores > VIS_SCORE_THRESH
-        instances = instances[keep_idxs]
-        
-        # 2. Filtro NMS (solo se rimangono box)
-        if len(instances) > 0:
-            keep = nms(instances.pred_boxes.tensor, instances.scores, NMS_THRESH)
-            instances = instances[keep]
+    # --- OUTPUT FINALI ---
+    final_panels = filtra_punti_unici(raw_detections, MERGE_DIST_METERS)
+    
+    kml = simplekml.Kml()
+    mosaico = cv2.imread(ORIGINAL_MOSAIC_PATH)
 
-        v = Visualizer(img[:, :, ::-1], 
-                       metadata=metadata, 
-                       scale=0.8, 
-                       instance_mode=ColorMode.IMAGE)
-        
-        out = v.draw_instance_predictions(instances)
-        
-        res_name = f"pred_{os.path.basename(d['file_name'])}"
-        save_path = os.path.join(vis_output, res_name)
-        cv2.imwrite(save_path, out.get_image()[:, :, ::-1])
-        
-        print(f"[{i+1}/{NUM_SAMPLES}] {res_name}: {len(instances)} oggetti salvati.")
+    # Stile pallini rossi Google Earth
+    shared_style = simplekml.Style()
+    shared_style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
+    shared_style.iconstyle.color = 'ff0000ff'  
+    shared_style.iconstyle.scale = 0.7         
+    shared_style.labelstyle.scale = 0          
 
-    print(f"\n✅ Completato! Controlla i messaggi 'Max Score' qui sopra.")
+    for idx, p in enumerate(final_panels):
+        pnt = kml.newpoint(name=f"P_{idx+1}", coords=[(p['lon'], p['lat'])])
+        pnt.style = shared_style
+        
+        if mosaico is not None:
+            cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), DOT_RADIUS_MOSAIC, (0, 0, 255), -1)
+
+    kml.save("Mappa_Rilevamenti.kml")
+    if mosaico is not None:
+        cv2.imwrite(OUTPUT_MOSAIC_MARKED, mosaico)
+
+    print("\n" + "="*50)
+    print(f"🎯 ANALISI COMPLETATA")
+    print(f"🎯 PANNELLI UNICI TROVATI: {len(final_panels)}")
+    print(f"🌍 KML GENERATO: Mappa_Rilevamenti.kml")
+    print("="*50)
+    
+    # Uscita definitiva
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

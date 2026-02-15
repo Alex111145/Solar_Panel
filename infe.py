@@ -64,6 +64,7 @@ NUM_CLASSES = 1
 CONFIDENCE_THRESH = 0.50  
 MERGE_DIST_METERS = 1.0
 VIS_SCORE_THRESH = 0.15 
+DOT_RADIUS_MOSAIC = 8
 NMS_THRESH = 0.50        
 NUM_SAMPLES = 15          
 
@@ -277,7 +278,7 @@ def main():
     mosaico = cv2.imread(ORIGINAL_MOSAIC_PATH)
     if mosaico is not None:
         for p in unique_panels:
-            cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), 25, (0, 0, 255), -1)
+           cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), DOT_RADIUS_MOSAIC, (0, 0, 255), -1)
         cv2.imwrite(OUTPUT_MOSAIC_MARKED, mosaico)
         print(f"✅ Mosaico salvato: {OUTPUT_MOSAIC_MARKED}")
     else:

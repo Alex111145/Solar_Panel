@@ -8,7 +8,7 @@ import detectron2.data.transforms as T
 from detectron2.data.datasets import register_coco_instances
 from detectron2.data import MetadataCatalog, DatasetCatalog, build_detection_train_loader
 from detectron2.config import get_cfg
-from detectron2.engine import DefaultTrainer, launch, HookBase
+from detectron2.engine import DefaultTrainer, launch, HookBase, hooks  # <--- AGGIUNTO hooks
 from detectron2.utils.events import get_event_storage
 from detectron2.data import DatasetMapper
 from maskdino import add_maskdino_config
@@ -25,7 +25,7 @@ VALID_IMG = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
 
 TRAIN_NAME = "solar_train_final"
 VALID_NAME = "solar_valid_final"
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_15")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_16")
 
 # ==========================================================================================
 # 1. UTILS
@@ -103,10 +103,8 @@ class CustomTrainMapper(DatasetMapper):
                 max_size=1333, 
                 sample_style="choice"
             ),
-            # MODIFICA: Ridotta la rotazione da 45 a 15 gradi per stabilità
             T.RandomRotation(angle=[-15, 15], expand=False),
-            # MODIFICA: Rimosso RandomCrop poiché le immagini sono già 800x800
-            # T.RandomCrop("relative_range", (0.8, 0.8)), 
+            T.RandomCrop("relative_range", (0.8, 0.8)), 
             T.RandomBrightness(0.8, 1.2),
             T.RandomContrast(0.8, 1.2),
             T.RandomSaturation(0.8, 1.2),
@@ -132,6 +130,8 @@ def setup(args=None):
     YAML_PATH = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
     cfg.merge_from_file(YAML_PATH)
     
+    cfg.MODEL.WEIGHTS = "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+
     cfg.MODEL.MASK_ON = True
     cfg.INPUT.MASK_FORMAT = "bitmask"
     
@@ -140,24 +140,27 @@ def setup(args=None):
    
     IMAGES_PER_GPU = 2
     
-    # Calcolo Batch Size Globale (Totale)
     GLOBAL_BATCH_SIZE = num_gpus * IMAGES_PER_GPU
     cfg.SOLVER.IMS_PER_BATCH = GLOBAL_BATCH_SIZE
     
-    # --- SCALING DEL LEARNING RATE (MODIFICATO) ---
-    # MODIFICA: Fissato LR a un valore basso e stabile per Transformer, invece di scalarlo linearmente
     cfg.SOLVER.BASE_LR = 0.0001
+    
+    cfg.SOLVER.OPTIMIZER = "ADAMW"
+    cfg.SOLVER.BACKBONE_MULTIPLIER = 0.1 
     
     print(f"\n⚡ CONFIGURAZIONE GPU ⚡")
     print(f"   GPUs Trovate: {num_gpus}")
     print(f"   Immagini per GPU: {IMAGES_PER_GPU}")
     print(f"   Batch Size Totale: {GLOBAL_BATCH_SIZE}")
-    print(f"   Learning Rate Fisso: {cfg.SOLVER.BASE_LR:.5f}\n")
+    print(f"   Learning Rate Fisso: {cfg.SOLVER.BASE_LR:.5f}")
 
     # --- ALTRI PARAMETRI ---
     cfg.SOLVER.WEIGHT_DECAY = 0.05 
-    cfg.SOLVER.MAX_ITER = 35000 
-    cfg.SOLVER.STEPS = (28000, 32000)
+    
+    # [MODIFICA 1] Riduzione iterazioni per evitare overfitting
+    cfg.SOLVER.MAX_ITER = 8000   
+    cfg.SOLVER.STEPS = (6000, 7500) 
+    
     cfg.SOLVER.WARMUP_ITERS = 1000
     
     cfg.SOLVER.CLIP_GRADIENTS.ENABLED = True
@@ -195,16 +198,24 @@ def main(args=None):
         
     trainer = CustomTrainer(cfg) 
     trainer.register_hooks([CSVLogHook(period=100)]) 
+    
+    # [MODIFICA 2] Aggiunta BestCheckpointer per salvare il modello migliore basato sulla validazione
+    trainer.register_hooks([
+        hooks.BestCheckpointer(
+            cfg.TEST.EVAL_PERIOD, 
+            trainer.checkpointer, 
+            val_metric="segm/AP"
+        )
+    ])
+    
     trainer.resume_or_load(resume=True)
     
     return trainer.train()
 
 if __name__ == "__main__":
-    # Rileva automaticamente le GPU visibili (passate da CUDA_VISIBLE_DEVICES)
     gpus_available = torch.cuda.device_count()
     
     print("Avvio training distribuito...")
-    # Lancia n processi, uno per ogni GPU disponibile
     launch(
         main, 
         num_gpus_per_machine=gpus_available,

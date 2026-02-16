@@ -1,6 +1,11 @@
 import json
 import re
 import os
+import pyperclip
+import time
+import webbrowser
+import subprocess
+import platform
 
 def get_base_dir():
     current_script_path = os.path.dirname(os.path.abspath(__file__))
@@ -18,24 +23,63 @@ INPUT_JSON = os.path.join(BASE_DIR, "datasets", "solar_datasets", "train", "_ann
 OUTPUT_JSON = os.path.join(BASE_DIR, "master_global_anchored.json")
 ANCHOR_FILE = os.path.join(BASE_DIR, "anchor_pixel_coords.json")
 
+def open_maps_half_window(url):
+    """Apre Google Maps in una finestrella compatta"""
+    # Dimensioni ancora più ridotte: 600x500
+    width, height = 300, 500
+    try:
+        if platform.system() == "Windows":
+            # Usa Edge o Chrome in modalità app (senza barre superflue)
+            subprocess.Popen(f'start msedge --app="{url}" --window-size={width},{height}', shell=True)
+        elif platform.system() == "Darwin": # macOS
+            subprocess.Popen(['open', '-n', '-a', 'Google Chrome', '--args', f'--app={url}', f'--window-size={width},{height}'])
+        else: # Linux
+            subprocess.Popen(['google-chrome', f'--app={url}', f'--window-size={width},{height}'])
+    except Exception:
+        webbrowser.open(url)
+
 def get_anchoring_data():
-    print("\n⚓ CONFIGURAZIONE ANCORAGGIO GPS")
+    print("\n⚓ CONFIGURAZIONE ANCORAGGIO GPS (Smart Mode)")
     
-    # Caricamento automatico Pixel dallo Step 1
     px_x, px_y = None, None
     if os.path.exists(ANCHOR_FILE):
         with open(ANCHOR_FILE, 'r') as f:
             coords = json.load(f)
             px_x, px_y = coords['px_x'], coords['px_y']
-            print(f"✅ Coordinate PIXEL caricate automaticamente dallo Step 1: X={px_x}, Y={px_y}")
+            print(f"✅ Coordinate PIXEL caricate: X={px_x}, Y={px_y}")
     else:
         print("⚠️ File coordinate non trovato. Inserimento manuale richiesto:")
         px_x = float(input("   Pixel X: ").replace(',', '.'))
         px_y = float(input("   Pixel Y: ").replace(',', '.'))
 
-    # Inserimento manuale solo per il GPS
-    gps_lat = float(input("\n📍 Inserisci LATITUDINE Google Maps: ").strip().replace(',', '.'))
-    gps_lon = float(input("📍 Inserisci LONGITUDINE Google Maps: ").strip().replace(',', '.'))
+    # Apertura in finestra piccola
+    open_maps_half_window("https://www.google.it/maps")
+    
+    print("\n--- ISTRUZIONI ---")
+    print("1. Vai sul punto della mappa corrispondente all'anchor pixel.")
+    print("2. Clicca con il TASTO DESTRO sul punto.")
+    print("3. CLICCA SULLE COORDINATE (le prime in alto) per copiarle.")
+    print("------------------")
+    print("⌛ In attesa che tu copi le coordinate negli appunti...")
+
+    gps_lat, gps_lon = None, None
+    try:
+        while True:
+            content = pyperclip.paste().strip()
+            match = re.search(r"(-?\d+\.\d+),\s*(-?\d+\.\d+)", content)
+            
+            if match:
+                gps_lat = float(match.group(1))
+                gps_lon = float(match.group(2))
+                print(f"\n🎯 COORDINATE RILEVATE E INSERITE!")
+                print(f"   Latitudine: {gps_lat}")
+                print(f"   Longitudine: {gps_lon}")
+                break
+            
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n❌ Operazione annullata.")
+        return None
     
     return {
         'anchor_pixel_x': px_x, 'anchor_pixel_y': px_y,
@@ -48,11 +92,11 @@ def convert_to_global():
         print(f"❌ File non trovato: {INPUT_JSON}"); return
 
     georef_data = get_anchoring_data()
+    if not georef_data: return
 
     with open(INPUT_JSON, 'r') as f:
         data = json.load(f)
 
-    # Logica di conversione (Invariata)
     for ann in data['annotations']:
         img = next(i for i in data['images'] if i['id'] == ann['image_id'])
         match = re.search(r"tile_col_(\d+)_row_(\d+)", img['file_name'])

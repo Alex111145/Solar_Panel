@@ -13,12 +13,6 @@ from detectron2.utils.events import get_event_storage
 from detectron2.data import DatasetMapper
 from maskdino import add_maskdino_config
 
-
-# uguale a v3 pero ha la multi gpu attiva 
-#
-#
-#
-#
 # ==========================================================================================
 # CONFIGURAZIONE PERCORSI
 # ==========================================================================================
@@ -31,7 +25,7 @@ VALID_IMG = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
 
 TRAIN_NAME = "solar_train_final"
 VALID_NAME = "solar_valid_final"
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_multi_gpu")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_15")
 
 # ==========================================================================================
 # 1. UTILS
@@ -109,8 +103,10 @@ class CustomTrainMapper(DatasetMapper):
                 max_size=1333, 
                 sample_style="choice"
             ),
-            T.RandomRotation(angle=[-45, 45], expand=False),
-            T.RandomCrop("relative_range", (0.8, 0.8)),
+            # MODIFICA: Ridotta la rotazione da 45 a 15 gradi per stabilità
+            T.RandomRotation(angle=[-15, 15], expand=False),
+            # MODIFICA: Rimosso RandomCrop poiché le immagini sono già 800x800
+            # T.RandomCrop("relative_range", (0.8, 0.8)), 
             T.RandomBrightness(0.8, 1.2),
             T.RandomContrast(0.8, 1.2),
             T.RandomSaturation(0.8, 1.2),
@@ -148,16 +144,15 @@ def setup(args=None):
     GLOBAL_BATCH_SIZE = num_gpus * IMAGES_PER_GPU
     cfg.SOLVER.IMS_PER_BATCH = GLOBAL_BATCH_SIZE
     
-    # --- SCALING DEL LEARNING RATE ---
-    # Regola base: se raddoppi il batch size, raddoppia il learning rate.
-    # Base LR per batch 2 era 0.0002.
-    cfg.SOLVER.BASE_LR = 0.0002 * (GLOBAL_BATCH_SIZE / 2)
+    # --- SCALING DEL LEARNING RATE (MODIFICATO) ---
+    # MODIFICA: Fissato LR a un valore basso e stabile per Transformer, invece di scalarlo linearmente
+    cfg.SOLVER.BASE_LR = 0.0001
     
     print(f"\n⚡ CONFIGURAZIONE GPU ⚡")
     print(f"   GPUs Trovate: {num_gpus}")
     print(f"   Immagini per GPU: {IMAGES_PER_GPU}")
     print(f"   Batch Size Totale: {GLOBAL_BATCH_SIZE}")
-    print(f"   Learning Rate Adattato: {cfg.SOLVER.BASE_LR:.5f}\n")
+    print(f"   Learning Rate Fisso: {cfg.SOLVER.BASE_LR:.5f}\n")
 
     # --- ALTRI PARAMETRI ---
     cfg.SOLVER.WEIGHT_DECAY = 0.05 

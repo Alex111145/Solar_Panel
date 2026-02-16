@@ -31,10 +31,10 @@ from detectron2.layers import nms
 # ⚙️ CONFIGURAZIONE PARAMETRI
 # ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_multi_gpu")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_15")
 VIS_OUTPUT_DIR = os.path.join(BASE_DIR, "risultati_visivi") 
 
-SOGLIA_DETECTION = 0.35 
+SOGLIA_DETECTION = 0.30
 NMS_THRESH = 0.40           
 MERGE_DIST_METERS = 0.8  
 

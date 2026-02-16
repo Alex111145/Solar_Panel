@@ -16,8 +16,10 @@ Questa pipeline guida l'utente dal caricamento di un ortomosaico grezzo alla cre
 
 ##  Fasi della Pipeline
 
-### Step 1. Generazione delle Patch e Punto di Ancora (Novità 📍)
+### Step 1. Generazione delle Patch e Punto di Ancora
 **Script:** `step1_tile_generator.py`
+
+> **⚠️ Alert** Su Linux/SSH, lo script verifica la presenza di X11. Se non rileva un display, si arresta consigliando come attivare x11 per il corretto funzionamento.
 
 Questo script gestisce l'intera fase di estrazione dati e configurazione spaziale attraverso un'interfaccia grafica interattiva.
 
@@ -27,7 +29,6 @@ Questo script gestisce l'intera fase di estrazione dati e configurazione spazial
 * **Selezione Punto di Ancora:** * Dopo la ROI, lo script richiede di cliccare un punto specifico sull'immagine (es. l'angolo di un pannello o un punto di controllo GIS).
     * **Azione:** Clicca con il **tasto sinistro** del mouse. Le coordinate pixel reali (X, Y) vengono salvate automaticamente in `anchor_pixel_coords.json`.
 * **Tiling e Filtraggio:** * L'area selezionata viene tagliata in patch da **800x800 pixel** con un **overlap del 95%**.
-    * **Filtro Black-Space:** Lo script scarta automaticamente le patch che contengono più dell'80% di vuoto (bordi neri dell'ortomosaico).
 * **Output:** Immagini salvate in `my_thesis_data/`.
 
 ---
@@ -44,6 +45,9 @@ Questo script gestisce l'intera fase di estrazione dati e configurazione spazial
 ### Step 3. Georeferenziazione Automatica
 **Script:** `step2_global_coordinates.py`
 
+> **⚠️ Alert** Su Linux/SSH, lo script verifica la presenza di X11. Se non rileva un display, si arresta consigliando come attivare x11 per il corretto funzionamento.
+
+
 Questo script è il "ponte" tra il mondo dei pixel e le coordinate geografiche reali. Integra un sistema semi-automatico per evitare errori di trascrizione.
 
 * **Caricamento Intelligente:** Recupera automaticamente le coordinate pixel dell'ancora salvate dallo Step 1.
@@ -55,8 +59,6 @@ Questo script è il "ponte" tra il mondo dei pixel e le coordinate geografiche r
 * **Trasformazione Globale:** * Converte le Bounding Box locali delle patch in coordinate globali dell'intero mosaico.
     * Inserisce i metadati GPS nel file finale.
 * **Output:** Genera `master_global_anchored.json`.
-
-> **⚠️ Requisiti Ambiente:** Su Linux/SSH, lo script verifica la presenza di X11. Se non rileva un display, si arresta per evitare crash del browser.
 
 ---
 ---

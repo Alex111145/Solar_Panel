@@ -34,24 +34,24 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_15")
 VIS_OUTPUT_DIR = os.path.join(BASE_DIR, "risultati_visivi") 
 
-SOGLIA_DETECTION = 0.30
+SOGLIA_DETECTION = 0. 
 NMS_THRESH = 0.40           
 MERGE_DIST_METERS = 0.8  
 
 DATASET_FOLDER_NAME = "solar_datasets"
 # CARTELLA Test: Usata come sorgente per le patch
-VAL_JSON = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "tewst", "_annotations.coco.json")
+VAL_JSON = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "test", "_annotations.coco.json")
 VAL_IMGS = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "test")
 
 YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
-checkpoints = glob.glob(os.path.join(OUTPUT_DIR, "model_*.pth"))
+checkpoints = glob.glob(os.path.join(OUTPUT_DIR, "model_0009999.pth"))
 WEIGHTS_FILE = max(checkpoints, key=os.path.getctime) if checkpoints else os.path.join(OUTPUT_DIR, "model_final.pth")
 
 ORIGINAL_MOSAIC_PATH = os.path.join(BASE_DIR, "ortomosaico.tif")
 OUTPUT_MOSAIC_MARKED = "Mosaico_Punti_Rilevati.jpg"
 
 NUM_CLASSES = 1
-DOT_RADIUS_MOSAIC = 6  
+DOT_RADIUS_MOSAIC = 6   
 
 # ==============================================================================
 # 🛠️ FUNZIONI TECNICHE
@@ -172,14 +172,36 @@ def main():
             scores_list = instances.scores.tolist()
 
             for j in range(len(instances)):
-                cx, cy = get_mask_center_precise(masks_np[j], boxes_np[j])
-                gx, gy = off_x + cx, off_y + cy
+                # Estrazione contorno preciso per il mosaico
+                mask_uint8 = (masks_np[j].astype("uint8") * 255)
+                contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
+                global_contour = None
+                cx, cy = 0, 0
+                
+                if len(contours) > 0:
+                    c = max(contours, key=cv2.contourArea)
+                    rect = cv2.minAreaRect(c)
+                    (cx_local, cy_local), _, _ = rect
+                    cx, cy = cx_local, cy_local
+                    
+                    global_contour = c.copy()
+                    global_contour[:, :, 0] += off_x
+                    global_contour[:, :, 1] += off_y
+                else:
+                    cx = (boxes_np[j][0] + boxes_np[j][2]) / 2
+                    cy = (boxes_np[j][1] + boxes_np[j][3]) / 2
+
+                gx, gy = off_x + cx, off_y + cy
                 proj_x, proj_y = affine * (gx, gy)
                 lon, lat = geo_transformer.transform(proj_x, proj_y)
-                raw_detections.append({'lat': lat, 'lon': lon, 'gx': gx, 'gy': gy})
+                
+                raw_detections.append({
+                    'lat': lat, 'lon': lon, 
+                    'gx': gx, 'gy': gy,
+                    'contour': global_contour
+                })
 
-            # Visualizzazione con label accuracy
             v = Visualizer(img[:, :, ::-1], metadata=metadata)
             labels = [f"{s:.1%}" for s in scores_list]
             out = v.overlay_instances(masks=instances.pred_masks, labels=labels, alpha=0.4)
@@ -193,19 +215,21 @@ def main():
     kml = simplekml.Kml()
     mosaico = cv2.imread(ORIGINAL_MOSAIC_PATH)
 
-    # Stile pallini rossi Google Earth
     shared_style = simplekml.Style()
     shared_style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
-    shared_style.iconstyle.color = 'ff0000ff'  
+    shared_style.iconstyle.color = 'ff0000ff'   
     shared_style.iconstyle.scale = 0.7         
-    shared_style.labelstyle.scale = 0          
+    shared_style.labelstyle.scale = 0           
 
     for idx, p in enumerate(final_panels):
         pnt = kml.newpoint(name=f"P_{idx+1}", coords=[(p['lon'], p['lat'])])
         pnt.style = shared_style
         
         if mosaico is not None:
-            cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), DOT_RADIUS_MOSAIC, (0, 0, 255), -1)
+            if p.get('contour') is not None:
+                cv2.drawContours(mosaico, [p['contour']], -1, (0, 0, 255), 2)
+            else:
+                cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), DOT_RADIUS_MOSAIC, (0, 0, 255), -1)
 
     kml.save("Mappa_Rilevamenti.kml")
     if mosaico is not None:
@@ -217,7 +241,6 @@ def main():
     print(f"🌍 KML GENERATO: Mappa_Rilevamenti.kml")
     print("="*50)
     
-    # Uscita definitiva
     sys.exit(0)
 
 if __name__ == "__main__":

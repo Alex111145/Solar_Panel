@@ -32,26 +32,43 @@ ANCHOR_FILE = os.path.join(BASE_DIR, "anchor_pixel_coords.json")
 # 🖥️ CONTROLLO AMBIENTE E GUI (X11 / DISPLAY CHECK)
 # ==============================================================================
 
+def is_ssh_connection():
+    """Rileva se la sessione corrente è via SSH."""
+    return 'SSH_CONNECTION' in os.environ or 'SSH_CLIENT' in os.environ
+
+def print_x11_tutorial():
+    """Stampa le istruzioni per attivare X11 se manca il display su server."""
+    print("\n" + "!"*60)
+    print("⚠️  ERRORE: INTERFACCIA GRAFICA NON DISPONIBILE")
+    print("!"*60)
+    print("\nSei collegato via SSH ma il server non può aprire il browser sul tuo PC.")
+    print("\nPROVA A RISOLVERE COSÌ:")
+    print("0. SCARICA VcXsrv (se non lo hai):")
+    print("   -> https://sourceforge.net/projects/vcxsrv/")
+    print("\n1. Su WINDOWS: Assicurati che VcXsrv (XLaunch) sia ATTIVO.")
+    print("   -> Controlla che 'Disable access control' sia spuntato in XLaunch.")
+    print("\n2. Su VS CODE: Apri il file config SSH e aggiungi queste righe:")
+    print("      ForwardX11 yes")
+    print("      ForwardX11Trusted yes")
+    print("\n3. RIAVVIA la connessione SSH (Reload Window in VS Code).")
+    print("\n4. VERIFICA: Digita 'echo $DISPLAY' nel terminale.")
+    print("   -> Se non esce nulla, il tunnel X11 non è ancora attivo.")
+    print("\n" + "!"*60 + "\n")
+
 def check_display_environment():
     """Controlla se l'ambiente supporta una GUI. Se no, ferma l'esecuzione."""
-    system = platform.system()
+    if not is_ssh_connection():
+        return True
     
-    if system == "Linux":
-        if "DISPLAY" not in os.environ:
-            print("\n❌ ERRORE CRITICO: Ambiente Headless rilevato (Lambda/SSH).")
-            print("⚠️  X11 non è attivo. La GUI di georeferenziazione non può partire.")
-            print("👉 Attiva il forwarding X11 o esegui su una macchina con monitor.")
-            sys.exit(1) # Si ferma immediatamente
-            
-    # Per Windows e Mac assumiamo che il display sia presente, 
-    # a meno che non si tratti di istanze server specifiche.
+    if 'DISPLAY' not in os.environ:
+        print_x11_tutorial()
+        sys.exit(1) # Si ferma immediatamente
+    
+    print(f"✅ Display remoto rilevato: {os.environ['DISPLAY']}")
     return True
 
 def open_maps_compact(url):
     """Apre la mappa in una finestrella dedicata (Modalità App)"""
-    # Verifichiamo il display prima di tentare l'apertura
-    check_display_environment()
-    
     width, height = 300, 500 # Dimensioni ultra-compatte richieste
     
     try:
@@ -60,7 +77,7 @@ def open_maps_compact(url):
             subprocess.Popen(f'start msedge --app="{url}" --window-size={width},{height}', shell=True)
         elif platform.system() == "Darwin": # macOS
             subprocess.Popen(['open', '-n', '-a', 'Google Chrome', '--args', f'--app={url}', f'--window-size={width},{height}'])
-        else: # Linux (con X11 garantito dal check precedente)
+        else: # Linux (X11)
             subprocess.Popen(['google-chrome', f'--app={url}', f'--window-size={width},{height}'])
     except Exception as e:
         print(f"⚠️ Errore durante l'apertura del browser: {e}")
@@ -71,6 +88,9 @@ def open_maps_compact(url):
 # ==============================================================================
 
 def convert_to_global():
+    # --- CONTROLLO X11 PREVENTIVO ---
+    check_display_environment()
+
     print(f"📂 Cartella di lavoro: {BASE_DIR}")
     
     if not os.path.exists(INPUT_JSON):
@@ -102,7 +122,6 @@ def convert_to_global():
     try:
         while True:
             content = pyperclip.paste().strip()
-            # Cerca il pattern Latitudine, Longitudine
             match = re.search(r"(-?\d+\.\d+),\s*(-?\d+\.\d+)", content)
             
             if match:

@@ -10,6 +10,7 @@ Questa pipeline guida l'utente dal caricamento di un ortomosaico grezzo alla cre
 * **Librerie Python:**
     ```bash
     pip install opencv-python simplekml
+    pip install opencv-python
     ```
 
 ---

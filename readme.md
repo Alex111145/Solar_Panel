@@ -1,64 +1,77 @@
-#  Pipeline di Lavoro: Preparazione Dataset Pannelli Solari
+# ☀️ Pipeline di Lavoro: Preparazione Dataset Pannelli Solari
 
-Questa pipeline guida l'utente dal caricamento di un ortomosaico grezzo alla creazione di un dataset georiferito e ottimizzato per l'addestramento di modelli di Computer Vision.
+Questa pipeline guida l'utente dal caricamento di un ortomosaico grezzo alla creazione di un dataset georiferito, filtrato e ottimizzato per l'addestramento di modelli di Computer Vision.
 
 ---
 
 ## 📋 Requisiti Preliminari
 
-* **File necessari:** Assicurati di avere `ortomosaico.tif` e `ortomosaico.tfw` nella stessa cartella degli script prima di iniziare.
+* **File sorgente:** Posiziona `ortomosaico.tif` e il relativo file `ortomosaico.tfw` nella root del progetto.
 * **Librerie Python:**
     ```bash
-    pip install opencv-python simplekml
-    pip install opencv-python
+    pip install opencv-python simplekml numpy
     ```
 
 ---
 
-## 🚀 Fasi della Pipeline
+##  Fasi della Pipeline
 
-### Step 1: Generazione delle Patch (Ritaglio)
+### Step 1. Generazione delle Patch e Punto di Ancora (Novità 📍)
 **Script:** `step1_tile_generator.py`
 
-Questo script rileva automaticamente l'ambiente (Locale o Server) e gestisce i percorsi in base alla macchina su cui lo esegui.
+Questo script gestisce l'intera fase di estrazione dati e configurazione spaziale attraverso un'interfaccia grafica interattiva.
 
-* **Cosa fa:** Carica l'ortomosaico e apre una finestra grafica per selezionare l'Area di Interesse (ROI).
-* **Azione:** Disegna un rettangolo sui pannelli solari e premi **INVIO** o **SPAZIO**.
-* **Risultato:** L'area viene tagliata in patch da **800x800 pixel** con un **overlap del 95%**. Le immagini vengono salvate in `my_thesis_data/`.
-
-> **Risoluzione problemi SSH (Server Remoti):**
-> Se ricevi l'errore `INTERFACCIA GRAFICA NON DISPONIBILE`, devi attivare il tunnel X11:
-> 1. Scarica **VcXsrv** e configura **XLaunch** con "Disable access control" spuntato.
-> 2. In **VS Code**, aggiungi `ForwardX11 yes` e `ForwardX11Trusted yes` nel tuo file config SSH.
-
----
-
-### Step 2: Fase di Annotazione (Esterna)
-*Questo passaggio avviene al di fuori di Python*.
-
-* Carica le immagini di `my_thesis_data/` su una piattaforma come **Roboflow**.
-* Esegui l'annotazione (creazione di box o poligoni sui pannelli).
-* Esporta i dati in formato **COCO JSON** e salvali in: `datasets/solar_datasets`.
+* **Rilevamento Percorsi:** Lo script identifica automaticamente se stai lavorando in locale (Windows/macOS) o su server, adattando le cartelle di input/output.
+* **Selezione ROI (Area di Interesse):** * Si apre una preview dell'ortomosaico. 
+    * **Azione:** Disegna un rettangolo sull'area dei pannelli e premi **SPAZIO** o **INVIO**.
+* **Selezione Punto di Ancora:** * Dopo la ROI, lo script richiede di cliccare un punto specifico sull'immagine (es. l'angolo di un pannello o un punto di controllo GIS).
+    * **Azione:** Clicca con il **tasto sinistro** del mouse. Le coordinate pixel reali (X, Y) vengono salvate automaticamente in `anchor_pixel_coords.json`.
+* **Tiling e Filtraggio:** * L'area selezionata viene tagliata in patch da **800x800 pixel** con un **overlap del 95%**.
+    * **Filtro Black-Space:** Lo script scarta automaticamente le patch che contengono più dell'80% di vuoto (bordi neri dell'ortomosaico).
+* **Output:** Immagini salvate in `my_thesis_data/`.
 
 ---
 
-### Step 3: Creazione del Master JSON Globale
+### Step 2. Annotazione (Esterna)
+*Passaggio manuale su piattaforma cloud o locale.*
+
+1.  Carica le patch generate su **Roboflow**
+2.  Esegui l'annotazione (Bbox o Poligoni) sui pannelli solari.
+3.  **Esporta** il dataset in formato **COCO JSON** e salvalo in: `datasets/solar_datasets/`.
+
+---
+
+### Step 3. Georeferenziazione Automatica
 **Script:** `step2_global_coordinates.py`
 
-Prende le annotazioni locali (0-800px) e le converte in coordinate globali riferite all'intero mosaico originale.
+Questo script è il "ponte" tra il mondo dei pixel e le coordinate geografiche reali. Integra un sistema semi-automatico per evitare errori di trascrizione.
 
-* **Dati richiesti:** Dovrai inserire le coordinate Pixel (X, Y) dell'ancora sul mosaico e le relative coordinate GPS (Lat/Lon).
-* **Risultato:** Genera `master_global_anchored.json`, che contiene tutte le annotazioni georiferite.
+* **Caricamento Intelligente:** Recupera automaticamente le coordinate pixel dell'ancora salvate dallo Step 1.
+* **Integrazione Browser (Maps Compact):** * Lo script apre automaticamente una finestra compatta di **Google Maps**.
+    * **Azione:** Trova il punto corrispondente all'ancora sulla mappa, fai tasto destro e clicca sulle coordinate per copiarle.
+* **Clipboard Monitoring (Auto-Paste):**
+    * Non serve incollare nulla nel terminale! Lo script monitora gli appunti (clipboard). 
+    * Appena rileva delle coordinate GPS valide, le acquisisce istantaneamente e procede con l'elaborazione.
+* **Trasformazione Globale:** * Converte le Bounding Box locali delle patch in coordinate globali dell'intero mosaico.
+    * Inserisce i metadati GPS nel file finale.
+* **Output:** Genera `master_global_anchored.json`.
+
+> **⚠️ Requisiti Ambiente:** Su Linux/SSH, lo script verifica la presenza di X11. Se non rileva un display, si arresta per evitare crash del browser.
 
 ---
+---
 
-### Step 4: Correzione e Rimappatura Classi
+### Step 4. Utility: Gestione Categorie e Sanificazione
 **Script:** `step3_util_remap_categories.py`
 
-Utility per la pulizia e l'organizzazione delle categorie del dataset.
+Questo script è fondamentale per preparare i file JSON all'addestramento, risolvendo conflitti di classi o errori di etichettatura tra i set di Train, Valid e Test.
 
-* **Eliminazione:** Se hai annotato una classe per errore, puoi eliminarla; lo script scalerà automaticamente gli ID delle altre classi.
-* **Modifica ID:** Puoi cambiare manualmente l'ID di una classe per adattarlo ai requisiti di modelli specifici.
-* **Sicurezza:** Crea automaticamente un file `_backup.json` prima di ogni modifica.
+* **Selezione Dataset Dinamica:** Lo script scansiona la cartella `datasets/` e ti permette di scegliere su quale progetto lavorare tramite un menu numerato.
+* **Analisi Multi-Set:** Elabora contemporaneamente i file `train`, `valid` e `test`, garantendo che la mappatura delle classi sia coerente in tutto il dataset.
+* **Due Modalità Operative:**
+    * **[0] Eliminazione con Scalamento:** Rimuove una classe (es. un errore di annotazione) e trasla automaticamente gli ID delle altre classi verso il basso per eliminare i "buchi" (indispensabile per YOLO e Detectron2).
+    * **[1] Rimappatura Manuale:** Permette di cambiare gli ID a piacimento (es. impostare "Pannello Integro" = 0, "Pannello Difettoso" = 1).
+* **Filtro Annotazioni:** Quando una classe viene eliminata, lo script pulisce automaticamente tutte le annotazioni associate nel file JSON.
+* **Sistema di Sicurezza:** Prima di ogni modifica, crea una copia di sicurezza `_annotations.coco_backup.json` per ogni set.
 
 ---

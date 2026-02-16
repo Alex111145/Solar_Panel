@@ -1,4 +1,4 @@
-# ☀️ Pipeline di Lavoro: Preparazione Dataset Pannelli Solari
+#  Pipeline di Lavoro: Preparazione Dataset Pannelli Solari
 
 Questa pipeline guida l'utente dal caricamento di un ortomosaico grezzo alla creazione di un dataset georiferito e ottimizzato per l'addestramento di modelli di Computer Vision.
 

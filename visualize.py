@@ -1,105 +1,119 @@
 #!/usr/bin/env python
 import os
-
-# Blocca i warning di OpenCV per i tag TIFF sconosciuti prima di caricare cv2
-os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
-
+import sys
+import glob
+import re
+import math
+import warnings
 import cv2
 import torch
-import re
-import glob
-import math
-import simplekml
-import warnings
 import numpy as np
 import rasterio
-import sys
+import simplekml
 from pyproj import Transformer
 
-# --- CONFIGURAZIONE AMBIENTE ---
+# --- CONFIGURAZIONE SISTEMA ---
+os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
 warnings.filterwarnings("ignore")
 
+# --- IMPORTS DETECTRON2 & MASKDINO ---
 from detectron2.config import get_cfg
 from detectron2.engine import DefaultPredictor
 from detectron2.utils.visualizer import Visualizer
-from detectron2.data import MetadataCatalog, DatasetCatalog
-from detectron2.data.datasets import register_coco_instances
-from maskdino import add_maskdino_config
+from detectron2.data import MetadataCatalog
 from detectron2.layers import nms
+
+try:
+    from maskdino import add_maskdino_config
+except ImportError:
+    print("❌ Errore: Libreria 'maskdino' non trovata. Esegui lo script dalla root del progetto.")
+    sys.exit(1)
 
 # ==============================================================================
 # ⚙️ CONFIGURAZIONE PARAMETRI
 # ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_15")
-VIS_OUTPUT_DIR = os.path.join(BASE_DIR, "risultati_visivi") 
-
-SOGLIA_DETECTION = 0. 
-NMS_THRESH = 0.40           
-MERGE_DIST_METERS = 0.8  
-
+OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_16")
 DATASET_FOLDER_NAME = "solar_datasets"
-# CARTELLA Test: Usata come sorgente per le patch
-VAL_JSON = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "test", "_annotations.coco.json")
-VAL_IMGS = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "test")
 
-YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
-checkpoints = glob.glob(os.path.join(OUTPUT_DIR, "model_0009999.pth"))
-WEIGHTS_FILE = max(checkpoints, key=os.path.getctime) if checkpoints else os.path.join(OUTPUT_DIR, "model_final.pth")
-
+# Cartelle Input
+VAL_IMGS = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "test") 
 ORIGINAL_MOSAIC_PATH = os.path.join(BASE_DIR, "ortomosaico.tif")
-OUTPUT_MOSAIC_MARKED = "Mosaico_Punti_Rilevati.jpg"
 
+# Cartelle Output
+VIS_OUTPUT_DIR = os.path.join(BASE_DIR, "inference_results")
+OUTPUT_MOSAIC_MARKED = "Mosaico_Finale_Rilevato.jpg"
+OUTPUT_KML = "Mappa_Pannelli.kml"
+
+# Parametri Modello
+YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
 NUM_CLASSES = 1
-DOT_RADIUS_MOSAIC = 6   
+
+# Soglie di Rilevamento
+SOGLIA_DETECTION = 0.35
+NMS_THRESH = 0.80
+MERGE_DIST_METERS = 1
+
+# Grafica
+DOT_RADIUS_MOSAIC = 8
 
 # ==============================================================================
-# 🛠️ FUNZIONI TECNICHE
+# 🛠️ FUNZIONI DI SUPPORTO
 # ==============================================================================
+
+def get_best_weights(output_dir):
+    best_model = os.path.join(output_dir, "model_best.pth")
+    final_model = os.path.join(output_dir, "model_final.pth")
+    if os.path.exists(best_model):
+        print(f"✅ Modello: {os.path.basename(best_model)}")
+        return best_model
+    elif os.path.exists(final_model):
+        print(f"⚠️ Modello: {os.path.basename(final_model)}")
+        return final_model
+    else:
+        checkpoints = glob.glob(os.path.join(output_dir, "model_*.pth"))
+        if checkpoints:
+            latest = max(checkpoints, key=os.path.getctime)
+            return latest
+        else:
+            print(f"❌ NESSUN modello .pth in {output_dir}")
+            sys.exit(1)
 
 def get_geo_tools(tif_path):
-    """Estrae i metadati geografici reali dal TIF."""
-    with rasterio.open(tif_path) as src:
-        affine = src.transform
-        crs = src.crs
-    transformer = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
-    return affine, transformer
-
-def get_mask_center_precise(mask, box):
-    mask_uint8 = (mask.astype("uint8") * 255)
-    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if len(contours) > 0:
-        c = max(contours, key=cv2.contourArea)
-        rect = cv2.minAreaRect(c)
-        (center_x, center_y), _, _ = rect
-        return center_x, center_y
-    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    if not os.path.exists(tif_path): return None, None
+    try:
+        with rasterio.open(tif_path) as src:
+            affine, crs = src.transform, src.crs
+        return affine, Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    except Exception as e:
+        print(f"⚠️ Errore GeoTIFF: {e}")
+        return None, None
 
 def filtra_punti_unici(detections, soglia_metri):
     unique_panels = []
+    detections.sort(key=lambda x: x['score'], reverse=True)
     for p in detections:
         found = False
         for up in unique_panels:
-            dist = math.sqrt((p['lat']-up['lat'])**2 + (p['lon']-up['lon'])**2) * 111000
+            dist = math.sqrt((p['lat'] - up['lat'])**2 + (p['lon'] - up['lon'])**2) * 111000
             if dist < soglia_metri:
                 n = up['count']
-                up['lat'] = (up['lat']*n + p['lat'])/(n+1)
-                up['lon'] = (up['lon']*n + p['lon'])/(n+1)
-                up['gx'] = (up['gx']*n + p['gx'])/(n+1)
-                up['gy'] = (up['gy']*n + p['gy'])/(n+1)
+                up['lat'] = (up['lat'] * n + p['lat']) / (n + 1)
+                up['lon'] = (up['lon'] * n + p['lon']) / (n + 1)
+                up['gx'] = (up['gx'] * n + p['gx']) / (n + 1)
+                up['gy'] = (up['gy'] * n + p['gy']) / (n + 1)
                 up['count'] += 1
                 found = True
                 break
-        if not found:
-            unique_panels.append({**p, 'count': 1})
+        if not found: unique_panels.append({**p, 'count': 1})
     return unique_panels
 
-def setup_cfg():
+def setup_cfg(weights_path):
     cfg = get_cfg()
     cfg.set_new_allowed(True)
     add_maskdino_config(cfg)
     cfg.merge_from_file(YAML_CONFIG)
-    cfg.MODEL.WEIGHTS = WEIGHTS_FILE
+    cfg.MODEL.WEIGHTS = weights_path
     cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = NUM_CLASSES
     cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = NUM_CLASSES
@@ -108,140 +122,139 @@ def setup_cfg():
     return cfg
 
 # ==============================================================================
-# 🚀 MAIN
+# 🚀 MAIN LOOP
 # ==============================================================================
 
 def main():
-    # Carica solo i file dalla cartella test
-    all_files = sorted(glob.glob(os.path.join(VAL_IMGS, "*.jpg")) + glob.glob(os.path.join(VAL_IMGS, "*.JPG")))
-    os.makedirs(VIS_OUTPUT_DIR, exist_ok=True)
+    print("\n--- AVVIO INFERENZA SOLAR PANELS ---")
     
-    if not all_files:
-        print(f"❌ Nessun file trovato in {VAL_IMGS}. Verifica il percorso.")
-        sys.exit(1)
-
-    print(f"\n📂 Analisi di {len(all_files)} patch dalla cartella test...")
-    try:
-        n_input = input("👉 Quante patch vuoi analizzare? (Invio per tutte): ")
-        n_choice = int(n_input) if n_input.strip() else 0
-        files_to_process = all_files[:n_choice] if n_choice > 0 else all_files
-    except EOFError:
-        files_to_process = all_files
-
-    cfg = setup_cfg()
+    # 1. Setup Modello
+    weights_path = get_best_weights(OUTPUT_DIR)
+    cfg = setup_cfg(weights_path)
     predictor = DefaultPredictor(cfg)
     
-    if "solar_test" not in DatasetCatalog.list():
-        register_coco_instances("solar_test", {}, VAL_JSON, VAL_IMGS)
-    metadata = MetadataCatalog.get("solar_test")
+    os.makedirs(VIS_OUTPUT_DIR, exist_ok=True)
     
-    # Inizializzazione Geografica
-    try:
-        affine, geo_transformer = get_geo_tools(ORIGINAL_MOSAIC_PATH)
-    except Exception as e:
-        print(f"❌ Errore caricamento TIF: {e}")
+    # 2. Caricamento File
+    all_files = sorted(glob.glob(os.path.join(VAL_IMGS, "*.jpg")) + glob.glob(os.path.join(VAL_IMGS, "*.JPG")))
+    if not all_files:
+        print(f"❌ Nessuna immagine trovata in {VAL_IMGS}")
         sys.exit(1)
 
+    # --- RICHIESTA INPUT UTENTE ---
+    print(f"📂 Trovate {len(all_files)} immagini totali.")
+    scelta = input("👉 Quante immagini vuoi analizzare? (Premi INVIO per tutte): ").strip()
+    
+    if scelta != "":
+        try:
+            limite = int(scelta)
+            all_files = all_files[:limite]
+            print(f"🚀 Procedo con le prime {len(all_files)} immagini.\n")
+        except ValueError:
+            print("⚠️ Input non valido. Analizzo tutto il dataset.\n")
+    else:
+        print("🚀 Analizzo tutte le immagini.\n")
+
+    # 3. Setup Geo
+    affine, geo_transformer = get_geo_tools(ORIGINAL_MOSAIC_PATH)
     raw_detections = []
-
-    print("-" * 60)
-    for i, path in enumerate(files_to_process):
-        fname = os.path.basename(path)
-        match = re.search(r"tile_col_(\d+)_row_(\d+)", fname)
-        if not match: continue
-        off_x, off_y = int(match.group(1)), int(match.group(2))
-
+    
+    # 4. Loop Inferenza
+    for i, path in enumerate(all_files):
+        # filename include l'estensione (es. tile_col_0_row_0.jpg)
+        filename = os.path.basename(path)
+        
+        match = re.search(r"tile_col_(\d+)_row_(\d+)", filename)
+        off_x, off_y = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
+            
         img = cv2.imread(path)
+        if img is None: continue
+
         outputs = predictor(img)
         instances = outputs["instances"].to("cpu")
         
-        # Filtro soglia esplicito
-        instances = instances[instances.scores > SOGLIA_DETECTION]
-        
         if len(instances) > 0:
-            # Filtro NMS
-            keep_nms = nms(instances.pred_boxes.tensor, instances.scores, NMS_THRESH)
-            instances = instances[keep_nms]
+            keep = nms(instances.pred_boxes.tensor, instances.scores, NMS_THRESH)
+            instances = instances[keep]
+
+        num_panels = len(instances)
+        max_score = instances.scores.max().item() if num_panels > 0 else 0.0
+        
+        # LOG TERMINALE CON ESTENSIONE FILE
+        print(f"📸 [{i+1}/{len(all_files)}] {filename} | Pannelli: {num_panels} | Conf: {max_score:.1%}")
+
+        if num_panels > 0:
+            v = Visualizer(img[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.0)
             
-            # Log terminale
-            max_score = instances.scores.max().item()
-            print(f"📸 [{i+1}/{len(files_to_process)}] {fname} | Pannelli: {len(instances)} | Accuracy Max: {max_score:.2%}")
+            # DISEGNA SOLO MASCHERE E PERCENTUALE
+            v.overlay_instances(masks=instances.pred_masks)
+            for k in range(num_panels):
+                score_pct = f"{int(instances.scores[k].item() * 100)}%"
+                v.draw_text(score_pct, instances.pred_boxes.tensor[k][:2])
+            
+            out = v.get_output()
+            cv2.imwrite(os.path.join(VIS_OUTPUT_DIR, f"res_{filename}"), out.get_image()[:, :, ::-1])
 
-            masks_np = instances.pred_masks.numpy()
-            boxes_np = instances.pred_boxes.tensor.numpy()
-            scores_list = instances.scores.tolist()
-
-            for j in range(len(instances)):
-                # Estrazione contorno preciso per il mosaico
-                mask_uint8 = (masks_np[j].astype("uint8") * 255)
-                contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if affine and geo_transformer:
+                masks = instances.pred_masks.numpy()
+                boxes = instances.pred_boxes.tensor.numpy()
+                scores = instances.scores.numpy()
                 
-                global_contour = None
-                cx, cy = 0, 0
-                
-                if len(contours) > 0:
-                    c = max(contours, key=cv2.contourArea)
-                    rect = cv2.minAreaRect(c)
-                    (cx_local, cy_local), _, _ = rect
-                    cx, cy = cx_local, cy_local
+                for k in range(num_panels):
+                    mask_uint8 = (masks[k].astype("uint8") * 255)
+                    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     
-                    global_contour = c.copy()
-                    global_contour[:, :, 0] += off_x
-                    global_contour[:, :, 1] += off_y
-                else:
-                    cx = (boxes_np[j][0] + boxes_np[j][2]) / 2
-                    cy = (boxes_np[j][1] + boxes_np[j][3]) / 2
+                    global_contour, cx_local, cy_local = None, 0, 0
+                    if len(contours) > 0:
+                        c = max(contours, key=cv2.contourArea)
+                        M = cv2.moments(c)
+                        if M["m00"] != 0:
+                            cx_local, cy_local = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                        global_contour = c.copy()
+                        global_contour[:, :, 0] += off_x
+                        global_contour[:, :, 1] += off_y
+                    else:
+                        cx_local, cy_local = (boxes[k][0] + boxes[k][2]) / 2, (boxes[k][1] + boxes[k][3]) / 2
 
-                gx, gy = off_x + cx, off_y + cy
-                proj_x, proj_y = affine * (gx, gy)
-                lon, lat = geo_transformer.transform(proj_x, proj_y)
-                
-                raw_detections.append({
-                    'lat': lat, 'lon': lon, 
-                    'gx': gx, 'gy': gy,
-                    'contour': global_contour
-                })
+                    gx, gy = off_x + cx_local, off_y + cy_local
+                    proj_x, proj_y = affine * (gx, gy)
+                    lon, lat = geo_transformer.transform(proj_x, proj_y)
+                    
+                    raw_detections.append({
+                        'lat': lat, 'lon': lon, 'gx': gx, 'gy': gy,
+                        'score': scores[k], 'contour': global_contour
+                    })
 
-            v = Visualizer(img[:, :, ::-1], metadata=metadata)
-            labels = [f"{s:.1%}" for s in scores_list]
-            out = v.overlay_instances(masks=instances.pred_masks, labels=labels, alpha=0.4)
-            cv2.imwrite(os.path.join(VIS_OUTPUT_DIR, f"res_{fname}"), out.get_image()[:, :, ::-1])
-        else:
-            print(f"📸 [{i+1}/{len(files_to_process)}] {fname} | Nessun pannello sopra soglia {SOGLIA_DETECTION}")
-
-    # --- OUTPUT FINALI ---
+    if not raw_detections:
+        print("\n❌ Nessun pannello rilevato.")
+        sys.exit(0)
+        
+    print(f"\n🔄 Fusione duplicati (Soglia: {MERGE_DIST_METERS}m)...")
     final_panels = filtra_punti_unici(raw_detections, MERGE_DIST_METERS)
     
+    # 5. Generazione Output Finale
     kml = simplekml.Kml()
-    mosaico = cv2.imread(ORIGINAL_MOSAIC_PATH)
-
-    shared_style = simplekml.Style()
-    shared_style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
-    shared_style.iconstyle.color = 'ff0000ff'   
-    shared_style.iconstyle.scale = 0.7         
-    shared_style.labelstyle.scale = 0           
-
     for idx, p in enumerate(final_panels):
-        pnt = kml.newpoint(name=f"P_{idx+1}", coords=[(p['lon'], p['lat'])])
-        pnt.style = shared_style
-        
-        if mosaico is not None:
-            if p.get('contour') is not None:
-                cv2.drawContours(mosaico, [p['contour']], -1, (0, 0, 255), 2)
-            else:
-                cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), DOT_RADIUS_MOSAIC, (0, 0, 255), -1)
+        pnt = kml.newpoint(name=f"PV_{idx+1}", coords=[(p['lon'], p['lat'])])
+        pnt.description = f"Score: {p['score']:.2f}"
+    kml.save(OUTPUT_KML)
+    print(f"✅ KML salvato: {OUTPUT_KML}")
 
-    kml.save("Mappa_Rilevamenti.kml")
-    if mosaico is not None:
-        cv2.imwrite(OUTPUT_MOSAIC_MARKED, mosaico)
+    if os.path.exists(ORIGINAL_MOSAIC_PATH):
+        try:
+            mosaico = cv2.imread(ORIGINAL_MOSAIC_PATH)
+            if mosaico is not None:
+                for p in final_panels:
+                    if p.get('contour') is not None:
+                         cv2.drawContours(mosaico, [p['contour']], -1, (0, 0, 255), 2)
+                    else:
+                        cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), DOT_RADIUS_MOSAIC, (0, 0, 255), -1)
+                cv2.imwrite(OUTPUT_MOSAIC_MARKED, mosaico)
+                print(f"✅ Mosaico salvato: {OUTPUT_MOSAIC_MARKED}")
+        except Exception as e:
+            print(f"⚠️ Errore mosaico: {e}")
 
-    print("\n" + "="*50)
-    print(f"🎯 ANALISI COMPLETATA")
-    print(f"🎯 PANNELLI UNICI TROVATI: {len(final_panels)}")
-    print(f"🌍 KML GENERATO: Mappa_Rilevamenti.kml")
-    print("="*50)
-    
-    sys.exit(0)
+    print("\n🎯 PROCEDURA COMPLETATA.")
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,7 @@ import torch
 import numpy as np
 import rasterio
 import simplekml
+import random  # <--- AGGIUNTO PER LA SELEZIONE CASUALE
 from pyproj import Transformer
 
 # --- CONFIGURAZIONE SISTEMA ---
@@ -126,7 +127,7 @@ def setup_cfg(weights_path):
 # ==============================================================================
 
 def main():
-    print("\n--- AVVIO INFERENZA SOLAR PANELS ---")
+    print("\n--- AVVIO INFERENZA SOLAR PANELS (RANDOM MODE) ---")
     
     # 1. Setup Modello
     weights_path = get_best_weights(OUTPUT_DIR)
@@ -143,13 +144,16 @@ def main():
 
     # --- RICHIESTA INPUT UTENTE ---
     print(f"📂 Trovate {len(all_files)} immagini totali.")
-    scelta = input("👉 Quante immagini vuoi analizzare? (Premi INVIO per tutte): ").strip()
+    scelta = input("👉 Quante immagini vuoi analizzare casualmente? (Premi INVIO per tutte): ").strip()
     
     if scelta != "":
         try:
             limite = int(scelta)
-            all_files = all_files[:limite]
-            print(f"🚀 Procedo con le prime {len(all_files)} immagini.\n")
+            # Evita errori se chiedi più foto di quelle presenti
+            limite = min(limite, len(all_files))
+            # SELEZIONE CASUALE
+            all_files = random.sample(all_files, limite)
+            print(f"🎲 Ho selezionato {len(all_files)} immagini a caso dal dataset.\n")
         except ValueError:
             print("⚠️ Input non valido. Analizzo tutto il dataset.\n")
     else:
@@ -161,7 +165,6 @@ def main():
     
     # 4. Loop Inferenza
     for i, path in enumerate(all_files):
-        # filename include l'estensione (es. tile_col_0_row_0.jpg)
         filename = os.path.basename(path)
         
         match = re.search(r"tile_col_(\d+)_row_(\d+)", filename)
@@ -180,13 +183,10 @@ def main():
         num_panels = len(instances)
         max_score = instances.scores.max().item() if num_panels > 0 else 0.0
         
-        # LOG TERMINALE CON ESTENSIONE FILE
         print(f"📸 [{i+1}/{len(all_files)}] {filename} | Pannelli: {num_panels} | Conf: {max_score:.1%}")
 
         if num_panels > 0:
             v = Visualizer(img[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.0)
-            
-            # DISEGNA SOLO MASCHERE E PERCENTUALE
             v.overlay_instances(masks=instances.pred_masks)
             for k in range(num_panels):
                 score_pct = f"{int(instances.scores[k].item() * 100)}%"
@@ -226,7 +226,7 @@ def main():
                     })
 
     if not raw_detections:
-        print("\n❌ Nessun pannello rilevato.")
+        print("\n❌ Nessun pannello rilevato nelle immagini selezionate.")
         sys.exit(0)
         
     print(f"\n🔄 Fusione duplicati (Soglia: {MERGE_DIST_METERS}m)...")

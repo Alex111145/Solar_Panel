@@ -22,29 +22,16 @@ def get_base_dir():
 BASE_DIR = get_base_dir()
 INPUT_IMAGE_PATH = os.path.join(BASE_DIR, "ortomosaico.tif")
 OUTPUT_DIR = os.path.join(BASE_DIR, "my_thesis_data")
-ANCHOR_FILE = os.path.join(BASE_DIR, "anchor_pixel_coords.json")
 
 TILE_SIZE = 800
 OVERLAP = 0.95
 IGNORE_EMPTY_THRESHOLD = 0.2
-
-anchor_coords = None
-
-def select_anchor_point_callback(event, x, y, flags, param):
-    global anchor_coords
-    if event == cv2.EVENT_LBUTTONDOWN:
-        scale = param['scale']
-        real_x = int(x / scale)
-        real_y = int(y / scale)
-        anchor_coords = (real_x, real_y)
-        print(f"\n📍 ANCORA SELEZIONATA: Pixel X={real_x}, Y={real_y}")
 
 # ==============================================================================
 # 🚀 CORE PIPELINE
 # ==============================================================================
 
 def main():
-    global anchor_coords
     print(f"📂 Cartella di lavoro: {BASE_DIR}")
 
     if not os.path.exists(INPUT_IMAGE_PATH):
@@ -72,31 +59,7 @@ def main():
         cv2.destroyAllWindows()
         return
 
-    # --- FASE 2: Selezione Punto Ancora con scritte su GUI ---
-    print("\n2️⃣ ORA SELEZIONA UN PUNTO COME ANCORA...")
-    cv2.setMouseCallback(window_name, select_anchor_point_callback, param={'scale': scale})
-    
-    while anchor_coords is None:
-        temp_view = preview_img.copy()
-        # Aggiunta istruzioni grafiche sulla finestra
-        cv2.putText(temp_view, "CLICCA UN PUNTO PER L'ANCORA (GPS)", (20, 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-  
-        cv2.imshow(window_name, temp_view)
-        if cv2.waitKey(1) & 0xFF == 27: break 
-
-    # Conferma visiva del punto selezionato
-    if anchor_coords:
-        with open(ANCHOR_FILE, 'w') as f:
-            json.dump({"px_x": anchor_coords[0], "px_y": anchor_coords[1]}, f)
-        
-        # Feedback visivo finale prima di chiudere
-        final_view = preview_img.copy()
-        cv2.putText(final_view, "PUNTO SALVATO! Inizio taglio...", (20, 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        cv2.imshow(window_name, final_view)
-        cv2.waitKey(1000) # Mostra per 1 secondo
-
+    # Chiudiamo la finestra dopo la selezione ROI
     cv2.destroyAllWindows()
     cv2.waitKey(1)
 

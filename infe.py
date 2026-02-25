@@ -1,224 +1,118 @@
-#!/usr/bin/env python
 import os
-
-# Blocca i warning di OpenCV per i tag TIFF sconosciuti prima di caricare cv2
-os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
-
-import cv2
-import torch
-import re
-import glob
-import math
-import simplekml
-import warnings
-import numpy as np
 import rasterio
-import sys
-from pyproj import Transformer
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.patches import ConnectionPatch
 
-# --- CONFIGURAZIONE AMBIENTE ---
-warnings.filterwarnings("ignore")
+TIF_PATH = "ortomosaico.tif"
+OUTPUT_TILING = "schema_tiling.png"
+OUTPUT_AFFINE = "schema_affine.png"
 
-from detectron2.config import get_cfg
-from detectron2.engine import DefaultPredictor
-from detectron2.utils.visualizer import Visualizer
-from detectron2.data import MetadataCatalog, DatasetCatalog
-from detectron2.data.datasets import register_coco_instances
-from maskdino import add_maskdino_config
-from detectron2.layers import nms
-
-# ==============================================================================
-# ⚙️ CONFIGURAZIONE PARAMETRI
-# ==============================================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_multi_gpu")
-VIS_OUTPUT_DIR = os.path.join(BASE_DIR, "risultati_visivi") 
-
-SOGLIA_DETECTION = 0.25  
-NMS_THRESH = 0.40           
-MERGE_DIST_METERS = 0.8  
-
-DATASET_FOLDER_NAME = "solar_datasets"
-# CARTELLA VALID: Usata come sorgente per le patch
-VAL_JSON = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid", "_annotations.coco.json")
-VAL_IMGS = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
-
-YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "maskdino_R50_bs16_50ep_3s.yaml")
-checkpoints = glob.glob(os.path.join(OUTPUT_DIR, "model_*.pth"))
-WEIGHTS_FILE = max(checkpoints, key=os.path.getctime) if checkpoints else os.path.join(OUTPUT_DIR, "model_final.pth")
-
-ORIGINAL_MOSAIC_PATH = os.path.join(BASE_DIR, "ortomosaico.tif")
-OUTPUT_MOSAIC_MARKED = "Mosaico_Punti_Rilevati.jpg"
-
-NUM_CLASSES = 1
-DOT_RADIUS_MOSAIC = 6  
-
-# ==============================================================================
-# 🛠️ FUNZIONI TECNICHE
-# ==============================================================================
-
-def get_geo_tools(tif_path):
-    """Estrae i metadati geografici reali dal TIF."""
-    with rasterio.open(tif_path) as src:
-        affine = src.transform
-        crs = src.crs
-    transformer = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
-    return affine, transformer
-
-def get_mask_center_precise(mask, box):
-    mask_uint8 = (mask.astype("uint8") * 255)
-    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if len(contours) > 0:
-        c = max(contours, key=cv2.contourArea)
-        rect = cv2.minAreaRect(c)
-        (center_x, center_y), _, _ = rect
-        return center_x, center_y
-    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-
-def filtra_punti_unici(detections, soglia_metri):
-    unique_panels = []
-    for p in detections:
-        found = False
-        for up in unique_panels:
-            dist = math.sqrt((p['lat']-up['lat'])**2 + (p['lon']-up['lon'])**2) * 111000
-            if dist < soglia_metri:
-                n = up['count']
-                up['lat'] = (up['lat']*n + p['lat'])/(n+1)
-                up['lon'] = (up['lon']*n + p['lon'])/(n+1)
-                up['gx'] = (up['gx']*n + p['gx'])/(n+1)
-                up['gy'] = (up['gy']*n + p['gy'])/(n+1)
-                up['count'] += 1
-                found = True
-                break
-        if not found:
-            unique_panels.append({**p, 'count': 1})
-    return unique_panels
-
-def setup_cfg():
-    cfg = get_cfg()
-    cfg.set_new_allowed(True)
-    add_maskdino_config(cfg)
-    cfg.merge_from_file(YAML_CONFIG)
-    cfg.MODEL.WEIGHTS = WEIGHTS_FILE
-    cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    cfg.MODEL.ROI_HEADS.NUM_CLASSES = NUM_CLASSES
-    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = NUM_CLASSES
-    cfg.MODEL.MaskDINO.NUM_CLASSES = NUM_CLASSES
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = SOGLIA_DETECTION
-    return cfg
-
-# ==============================================================================
-# 🚀 MAIN
-# ==============================================================================
-
-def main():
-    # Carica solo i file dalla cartella VALID
-    all_files = sorted(glob.glob(os.path.join(VAL_IMGS, "*.jpg")) + glob.glob(os.path.join(VAL_IMGS, "*.JPG")))
-    os.makedirs(VIS_OUTPUT_DIR, exist_ok=True)
+def genera_schema_tiling():
+    print("⏳ Generazione Schema Tiling (Lettura dimensioni reali in corso)...")
     
-    if not all_files:
-        print(f"❌ Nessun file trovato in {VAL_IMGS}. Verifica il percorso.")
-        sys.exit(1)
-
-    print(f"\n📂 Analisi di {len(all_files)} patch dalla cartella VALID...")
+    fig, ax_main = plt.subplots(figsize=(14, 9))
+    fig.patch.set_facecolor('white')
+    
     try:
-        n_input = input("👉 Quante patch vuoi analizzare? (Invio per tutte): ")
-        n_choice = int(n_input) if n_input.strip() else 0
-        files_to_process = all_files[:n_choice] if n_choice > 0 else all_files
-    except EOFError:
-        files_to_process = all_files
-
-    cfg = setup_cfg()
-    predictor = DefaultPredictor(cfg)
-    
-    if "solar_val" not in DatasetCatalog.list():
-        register_coco_instances("solar_val", {}, VAL_JSON, VAL_IMGS)
-    metadata = MetadataCatalog.get("solar_val")
-    
-    # Inizializzazione Geografica
-    try:
-        affine, geo_transformer = get_geo_tools(ORIGINAL_MOSAIC_PATH)
+        with rasterio.open(TIF_PATH) as src:
+            img_w, img_h = src.width, src.height
+            print(f"📊 Dimensioni Reali Mosaico: {img_w} x {img_h} pixel")
+            scale_factor = 0.05  
+            h_small = int(img_h * scale_factor)
+            w_small = int(img_w * scale_factor)
+            img = src.read(1, out_shape=(h_small, w_small)) 
+            ax_main.imshow(img, cmap='gray', alpha=0.75, extent=[0, img_w, img_h, 0])
     except Exception as e:
-        print(f"❌ Errore caricamento TIF: {e}")
-        sys.exit(1)
+        print(f"⚠️ Impossibile caricare il TIF ({e}). Uso coordinate di simulazione.")
+        img_w, img_h = 20000, 15000 
+        ax_main.imshow(np.random.rand(10, 10), cmap='gray', alpha=0.2, extent=[0, img_w, img_h, 0])
 
-    raw_detections = []
+    tile_w, tile_h = 800, 800
+    for x in range(0, img_w, tile_w):
+        ax_main.axvline(x, color='#4169E1', linestyle='-', linewidth=0.3, alpha=0.5)
+    for y in range(0, img_h, tile_h):
+        ax_main.axhline(y, color='#4169E1', linestyle='-', linewidth=0.3, alpha=0.5)
 
-    print("-" * 60)
-    for i, path in enumerate(files_to_process):
-        fname = os.path.basename(path)
-        match = re.search(r"tile_col_(\d+)_row_(\d+)", fname)
-        if not match: continue
-        off_x, off_y = int(match.group(1)), int(match.group(2))
-
-        img = cv2.imread(path)
-        outputs = predictor(img)
-        instances = outputs["instances"].to("cpu")
-        
-        # Filtro soglia esplicito
-        instances = instances[instances.scores > SOGLIA_DETECTION]
-        
-        if len(instances) > 0:
-            # Filtro NMS
-            keep_nms = nms(instances.pred_boxes.tensor, instances.scores, NMS_THRESH)
-            instances = instances[keep_nms]
-            
-            # Log terminale
-            max_score = instances.scores.max().item()
-            print(f"📸 [{i+1}/{len(files_to_process)}] {fname} | Pannelli: {len(instances)} | Accuracy Max: {max_score:.2%}")
-
-            masks_np = instances.pred_masks.numpy()
-            boxes_np = instances.pred_boxes.tensor.numpy()
-            scores_list = instances.scores.tolist()
-
-            for j in range(len(instances)):
-                cx, cy = get_mask_center_precise(masks_np[j], boxes_np[j])
-                gx, gy = off_x + cx, off_y + cy
-                
-                proj_x, proj_y = affine * (gx, gy)
-                lon, lat = geo_transformer.transform(proj_x, proj_y)
-                raw_detections.append({'lat': lat, 'lon': lon, 'gx': gx, 'gy': gy})
-
-            # Visualizzazione con label accuracy
-            v = Visualizer(img[:, :, ::-1], metadata=metadata)
-            labels = [f"{s:.1%}" for s in scores_list]
-            out = v.overlay_instances(masks=instances.pred_masks, labels=labels, alpha=0.4)
-            cv2.imwrite(os.path.join(VIS_OUTPUT_DIR, f"res_{fname}"), out.get_image()[:, :, ::-1])
-        else:
-            print(f"📸 [{i+1}/{len(files_to_process)}] {fname} | Nessun pannello sopra soglia {SOGLIA_DETECTION}")
-
-    # --- OUTPUT FINALI ---
-    final_panels = filtra_punti_unici(raw_detections, MERGE_DIST_METERS)
+    target_x = (img_w // 2) - ((img_w // 2) % tile_w)
+    target_y = (img_h // 2) - ((img_h // 2) % tile_h)
     
-    kml = simplekml.Kml()
-    mosaico = cv2.imread(ORIGINAL_MOSAIC_PATH)
-
-    # Stile pallini rossi Google Earth
-    shared_style = simplekml.Style()
-    shared_style.iconstyle.icon.href = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
-    shared_style.iconstyle.color = 'ff0000ff'  
-    shared_style.iconstyle.scale = 0.7         
-    shared_style.labelstyle.scale = 0          
-
-    for idx, p in enumerate(final_panels):
-        pnt = kml.newpoint(name=f"P_{idx+1}", coords=[(p['lon'], p['lat'])])
-        pnt.style = shared_style
-        
-        if mosaico is not None:
-            cv2.circle(mosaico, (int(p['gx']), int(p['gy'])), DOT_RADIUS_MOSAIC, (0, 0, 255), -1)
-
-    kml.save("Mappa_Rilevamenti.kml")
-    if mosaico is not None:
-        cv2.imwrite(OUTPUT_MOSAIC_MARKED, mosaico)
-
-    print("\n" + "="*50)
-    print(f"🎯 ANALISI COMPLETATA")
-    print(f"🎯 PANNELLI UNICI TROVATI: {len(final_panels)}")
-    print(f"🌍 KML GENERATO: Mappa_Rilevamenti.kml")
-    print("="*50)
+    rect_tile = patches.Rectangle((target_x, target_y), tile_w, tile_h, 
+                                  linewidth=3, edgecolor='red', facecolor='yellow', alpha=0.6)
+    ax_main.add_patch(rect_tile)
     
-    # Uscita definitiva
-    sys.exit(0)
+    bbox_props = dict(boxstyle="round,pad=0.3", fc="white", ec="red", alpha=0.9)
+    text_offset_y = img_h * 0.03 
+    ax_main.text(target_x, target_y - text_offset_y, f"Patch: tile_col_{target_x}_row_{target_y}", 
+                 color='red', fontsize=12, fontweight='bold', bbox=bbox_props)
+
+    ax_zoom = fig.add_axes([0.65, 0.45, 0.30, 0.40]) 
+    ax_zoom.set_title(f"Sistema di Riferimento Locale ({tile_w}x{tile_h})", fontsize=11, fontweight='bold')
+    ax_zoom.set_xlim(0, tile_w)
+    ax_zoom.set_ylim(tile_h, 0) 
+    ax_zoom.set_facecolor('#f8f9fa')
+    
+    ax_zoom.set_xticks(np.arange(0, tile_w+1, 200))
+    ax_zoom.set_yticks(np.arange(0, tile_h+1, 200))
+    ax_zoom.grid(True, linestyle='--', alpha=0.7)
+    ax_zoom.set_xlabel("x (pixel)")
+    ax_zoom.set_ylabel("y (pixel)")
+    
+    # 🔥 MODIFICA: Inserito un poligono inclinato e decentrato (non un rettangolo dritto)
+    polygon_points = [[550, 120], [700, 160], [670, 240], [520, 200]]
+    poly_panel = patches.Polygon(polygon_points, closed=True, linewidth=2, edgecolor='green', facecolor='#2ca02c', alpha=0.8)
+    ax_zoom.add_patch(poly_panel)
+    
+    # Centroide approssimativo del poligono
+    cx, cy = 610, 180
+    ax_zoom.plot(cx, cy, 'ko') 
+    ax_zoom.text(cx - 150, cy + 10, r"$(x_{local}, y_{local})$", color='black', fontsize=13)
+
+    con = ConnectionPatch(xyA=(0, tile_h/2), xyB=(target_x + tile_w, target_y + tile_h/2), 
+                          coordsA="data", coordsB="data",
+                          axesA=ax_zoom, axesB=ax_main,
+                          arrowstyle="-|>", color="red", lw=2.5)
+    ax_zoom.add_artist(con)
+
+    ax_main.set_title("Ortomosaico - Sistema di Riferimento Globale (Pixel)", fontsize=16, fontweight='bold')
+    ax_main.set_xlabel("Larghezza Globale X (pixel)")
+    ax_main.set_ylabel("Altezza Globale Y (pixel)")
+    
+    plt.subplots_adjust(right=0.6) 
+    plt.savefig(OUTPUT_TILING, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Salvato con successo (Tiling con poligono annotato): {OUTPUT_TILING}")
+
+def genera_schema_affine():
+    print("⏳ Generazione Schema Affine in corso...")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor('white')
+    ax.axis('off') 
+
+    box_raster = patches.FancyBboxPatch((0.1, 0.4), 0.2, 0.3, boxstyle="round,pad=0.05", edgecolor='blue', facecolor='#e6f2ff', lw=2)
+    ax.add_patch(box_raster)
+    ax.text(0.2, 0.6, "Spazio Raster\n(Pixel)", ha='center', va='center', fontsize=14, fontweight='bold')
+    ax.text(0.2, 0.5, r"$(px, py)$", ha='center', va='center', fontsize=12)
+
+    box_geo = patches.FancyBboxPatch((0.7, 0.4), 0.2, 0.3, boxstyle="round,pad=0.05", edgecolor='green', facecolor='#e6ffe6', lw=2)
+    ax.add_patch(box_geo)
+    ax.text(0.8, 0.6, "Spazio Geografico\n(WGS 84)", ha='center', va='center', fontsize=14, fontweight='bold')
+    ax.text(0.8, 0.5, r"$(Lon, Lat)$", ha='center', va='center', fontsize=12)
+
+    ax.annotate("", xy=(0.7, 0.55), xytext=(0.3, 0.55), arrowprops=dict(arrowstyle="simple", color="black", lw=2))
+    
+    math_text = (
+        "Matrice World File (.tfw)\n\n"
+        r"$Lon = A \cdot px + B \cdot py + C$" + "\n" +
+        r"$Lat = D \cdot px + E \cdot py + F$"
+    )
+    ax.text(0.5, 0.65, math_text, ha='center', va='bottom', fontsize=14, bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.5'))
+
+    plt.savefig(OUTPUT_AFFINE, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Salvato con successo: {OUTPUT_AFFINE}")
 
 if __name__ == "__main__":
-    main()
+    genera_schema_tiling()
+    genera_schema_affine()

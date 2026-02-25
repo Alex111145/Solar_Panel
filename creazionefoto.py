@@ -80,7 +80,7 @@ def genera_schema_tiling():
     ax_zoom.text(cx + 20, cy, r"$(x_{local}, y_{local})$", color='black', fontsize=13, verticalalignment='center')
 
     # Legenda (Solo Centroide)
-    legend_text = "Punto di Estrazione:\n"
+    legend_text = "Centroide pannello rilevato\n"
     legend_text += f"Centroide (x, y): ({cx}, {cy})"
     
     ax_zoom.text(0.95, 0.95, legend_text, transform=ax_zoom.transAxes, fontsize=11,

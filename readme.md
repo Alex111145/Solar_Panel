@@ -1,4 +1,4 @@
-
+inferenzanuovosito
 Fase 1 — Taglia il nuovo ortomosaico in tile usando la stessa logica e lo stesso formato di nomi (tile_col_{X}_row_{Y}.jpg). Questo è fondamentale perché le coordinate X e Y nel nome del file sono l'offset in pixel che serve per ricostruire la posizione globale.
 Fase 2 — Carica il tuo modello MaskDINO addestrato e lo fa girare su ogni tile. Le predizioni (bbox, maschere, score di confidenza) vengono salvate in un JSON con lo stesso identico formato COCO delle annotazioni manuali. In pratica il modello "annota" al posto tuo.
 Fase 3 — Prende quel JSON e applica la trasformazione TFW (la stessa logica di convert_to_global.py) per calcolare latitudine e longitudine di ogni pannello trovato.

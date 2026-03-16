@@ -1,0 +1,7 @@
+grep "segm/AP" ~/DinoMask/output_solar_swinLb/metrics.json | python3 -c "
+import sys, json
+lines = sys.stdin.readlines()
+for l in lines:
+    d = json.loads(l)
+    print(f\"Iter {d.get('iteration','?'):6} | AP: {d.get('segm/AP','?'):.2f}%\")
+"

@@ -1,0 +1,4 @@
+# ninja log v7
+0	7500	1770828060755888163	/home/agervasini/DinoMask/maskdino/modeling/pixel_decoder/ops/build/temp.linux-x86_64-cpython-312/home/agervasini/DinoMask/maskdino/modeling/pixel_decoder/ops/src/cpu/ms_deform_attn_cpu.o	13715c0207b7bc7c
+0	18523	1770828060757441858	/home/agervasini/DinoMask/maskdino/modeling/pixel_decoder/ops/build/temp.linux-x86_64-cpython-312/home/agervasini/DinoMask/maskdino/modeling/pixel_decoder/ops/src/cuda/ms_deform_attn_cuda.o	b9dc2f1053ead4e1
+1	20346	1770828060757846224	/home/agervasini/DinoMask/maskdino/modeling/pixel_decoder/ops/build/temp.linux-x86_64-cpython-312/home/agervasini/DinoMask/maskdino/modeling/pixel_decoder/ops/src/vision.o	24ddde1c9f99c9e3

@@ -1,0 +1,10 @@
+# Ignora i pesi dei modelli (troppo grandi)
+weights/*.pth
+
+# Ignora file di cache di Python
+**/__pycache__/
+*.pyc
+
+# Ignora file immagine pesanti (se necessario)
+*.tif
+*.tfw

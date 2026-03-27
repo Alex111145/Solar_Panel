@@ -1,14 +1,4 @@
-Questo repository contiene la pipeline per l'addestramento e l'inferenza di modelli MaskDINO applicati alla segmentazione di pannelli solari. La configurazione è ottimizzata per un ambiente Linux con GPU NVIDIA e utilizza il backbone Swin-L per la massima precisione.
 
-📋 Requisiti di Sistema
-GPU: NVIDIA con driver compatibili CUDA 12.4+.
-
-VRAM: Minimo 24GB consigliati per Swin-L.
-
-Percorso di Lavoro: /root.
-
-🛠️ 1. Creazione Ambiente Virtuale
-Configura un ambiente isolato in /root per gestire le dipendenze.
 
 Bash
 cd /root

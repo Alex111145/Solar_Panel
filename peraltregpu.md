@@ -91,11 +91,3 @@ CUDA_VISIBLE_DEVICES=0,1 python trainswin.py
 ```
 
 ---
-
-
-print(f"CUDA: {torch.cuda.is_available()}")
-print(f"Pesi Swin-L: {size_mb:.2f} MB (Target: >600MB)")
-
-from maskdino.modeling.pixel_decoder.ops.modules import MSDeformAttn
-print("✅ Moduli MaskDINO caricati!")
-```

@@ -45,7 +45,7 @@ VALID_IMG  = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
 
 TRAIN_NAME = "solar_train_final"
 VALID_NAME = "solar_valid_final"
-OUTPUT_DIR = os.path.join(BASE_DIR, "/workspace/output_solar_nuovor50")
+OUTPUT_DIR = os.path.join(BASE_DIR, "/workspace/cortor50")
 
 # ==========================================================================================
 # SOGLIE FILTRAGGIO ANNOTAZIONI BORDER
@@ -290,16 +290,16 @@ def setup(args=None):
     cfg.SOLVER.BACKBONE_MULTIPLIER = 0.05
     cfg.SOLVER.WEIGHT_DECAY        = 0.05
 
-    cfg.SOLVER.MAX_ITER     = 3000
-    cfg.SOLVER.STEPS        = (2000, 2500)
-    cfg.SOLVER.WARMUP_ITERS = 800
+    cfg.SOLVER.MAX_ITER     = 800
+    cfg.SOLVER.STEPS        = (400, 600)
+    cfg.SOLVER.WARMUP_ITERS = 50
 
     cfg.SOLVER.CLIP_GRADIENTS.ENABLED    = True
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE  = "norm"
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 1.0
 
-    cfg.TEST.EVAL_PERIOD          = 800
-    cfg.SOLVER.CHECKPOINT_PERIOD  = 800
+    cfg.TEST.EVAL_PERIOD          = 100
+    cfg.SOLVER.CHECKPOINT_PERIOD  = 100
 
     cfg.DATASETS.TRAIN = (TRAIN_NAME,)
     cfg.DATASETS.TEST  = (VALID_NAME,)

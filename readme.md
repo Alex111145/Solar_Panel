@@ -62,6 +62,8 @@ Installa le librerie per l'elaborazione dei dati e la gestione geospaziale.
 
 ```bash
 cd /root
+pip install -r requirements.txt
+o
 pip install opencv-python-headless numpy rasterio shapely pyyaml pandas
 ```
 

@@ -87,7 +87,7 @@ export PYTHONPATH=$PYTHONPATH:/root/DinoMask
 Lancia il training su 2 GPU (es. ID 0 e 1):
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python trainswin.py 
+CUDA_VISIBLE_DEVICES=0,1 python -W ignore train.py
 ```
 
 ---

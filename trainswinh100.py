@@ -45,7 +45,7 @@ VALID_IMG  = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
 
 TRAIN_NAME = "solar_train_swinL"
 VALID_NAME = "solar_valid_swinL"
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_solar_swinLb")
+OUTPUT_DIR = os.path.join(BASE_DIR, "/workspace/cortoswin")
 
 # ==========================================================================================
 # SOGLIE FILTRAGGIO ANNOTAZIONI BORDER
@@ -283,16 +283,16 @@ def setup(args=None):
     cfg.SOLVER.WEIGHT_DECAY        = 0.05
 
     # Best AP a iter ~2000 → fermiamo a 5000 con step decay a 3000/4500
-    cfg.SOLVER.MAX_ITER     = 3000   # best AP atteso ~iter 2000
-    cfg.SOLVER.STEPS        = (2500, 3200)
-    cfg.SOLVER.WARMUP_ITERS = 800
+    cfg.SOLVER.MAX_ITER     = 800   # best AP atteso ~iter 2000
+    cfg.SOLVER.STEPS        = (400,600)
+    cfg.SOLVER.WARMUP_ITERS = 50
 
     cfg.SOLVER.CLIP_GRADIENTS.ENABLED    = True
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE  = "norm"
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 1.0
 
-    cfg.TEST.EVAL_PERIOD         = 800
-    cfg.SOLVER.CHECKPOINT_PERIOD = 800
+    cfg.TEST.EVAL_PERIOD         = 100
+    cfg.SOLVER.CHECKPOINT_PERIOD = 100
 
     cfg.DATASETS.TRAIN = (TRAIN_NAME,)
     cfg.DATASETS.TEST  = (VALID_NAME,)
@@ -375,7 +375,7 @@ def main(args=None):
     ])
 
     # resume=False — parte sempre da zero con pesi Swin-L pre-trainati
-    trainer.resume_or_load(resume=False)
+    trainer.resume_or_load(resume=True)
     return trainer.train()
 
 

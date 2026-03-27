@@ -87,25 +87,11 @@ export PYTHONPATH=$PYTHONPATH:/root/DinoMask
 Lancia il training su 2 GPU (es. ID 0 e 1):
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python /root/train_net.py --num-gpus 2
+CUDA_VISIBLE_DEVICES=0,1 python trainswin.py 
 ```
 
 ---
 
-## ✅ 7. Verifica Setup
-
-Esegui lo script di controllo per validare l'installazione e l'integrità dei pesi.
-
-```python
-# Crea un file check_setup.py ed eseguilo
-import torch
-import os
-import sys
-
-sys.path.append("/root/DinoMask")
-
-weights = "/root/DinoMask/weights/maskdino_swinl_pretrained.pth"
-size_mb = os.path.getsize(weights) / (1024*1024) if os.path.exists(weights) else 0
 
 print(f"CUDA: {torch.cuda.is_available()}")
 print(f"Pesi Swin-L: {size_mb:.2f} MB (Target: >600MB)")

@@ -30,6 +30,7 @@ import simplekml
 import random
 import pandas as pd
 import geopandas as gpd
+import requests
 
 # DJI Thermal Analysis Tool 3 — SDK Python (operante in background)
 try:
@@ -113,6 +114,22 @@ TECNOLOGIE_PANNELLO = {
     "1": {"nome": "Monocristallino (mono-Si)", "gamma": -0.0045, "eta_nom": 0.20},
     "2": {"nome": "Policristallino (poly-Si)", "gamma": -0.0040, "eta_nom": 0.17},
 }
+
+# ==============================================================================
+# ☀️ CONFIGURAZIONE PVGIS
+# ==============================================================================
+PVGIS_BASE_URL       = "https://re.jrc.ec.europa.eu/api/v5_2"
+PVGIS_TIMEOUT        = 30    # secondi
+
+POTENZA_PANNELLO_KWP = 0.40  # kWp per pannello (default 400 W)
+PERDITE_SISTEMA      = 14    # % perdite (cablaggio, inverter, sporco)
+INCLINAZIONE_DEFAULT = 35    # ° tilt (0 = orizzontale)
+ORIENTAMENTO_DEFAULT = 0     # ° azimuth (0 = Sud, -90 = Est, 90 = Ovest)
+
+CO2_COEFF_KG_KWH     = 0.233 # kgCO₂ evitata per kWh (media EU grid mix)
+
+MESI_IT = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+           "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
 
 # ==============================================================================
 # 🛠️ FUNZIONI
@@ -291,6 +308,138 @@ def estrai_dato_termico(thermal_array, mask, class_id, t_amb_c, epsilon, correct
     return t_apparente, t_reale, eta
 
 
+def geocodifica_citta(citta: str):
+    """
+    Converte il nome città in (lat, lon) tramite Nominatim (OpenStreetMap).
+    Restituisce (lat, lon, display_name) oppure (None, None, None).
+    """
+    try:
+        url    = "https://nominatim.openstreetmap.org/search"
+        params = {"q": citta, "format": "json", "limit": 1}
+        headers = {"User-Agent": "SolarPanelDetector/1.0"}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            return float(data[0]["lat"]), float(data[0]["lon"]), data[0].get("display_name", citta)
+        return None, None, None
+    except Exception as e:
+        print(f"  ⚠️  Geocodifica fallita: {e}")
+        return None, None, None
+
+
+def ottieni_dati_pvgis(lat: float, lon: float, peakpower_kwp: float = POTENZA_PANNELLO_KWP,
+                        loss: float = PERDITE_SISTEMA, tilt: float = INCLINAZIONE_DEFAULT,
+                        azimuth: float = ORIENTAMENTO_DEFAULT):
+    """
+    Chiama PVGIS API v5.2 — endpoint /PVcalc.
+    Restituisce il JSON con produzione mensile/annuale per 1 kWp, oppure None.
+    """
+    try:
+        resp = requests.get(
+            f"{PVGIS_BASE_URL}/PVcalc",
+            params={
+                "lat": lat, "lon": lon,
+                "peakpower": peakpower_kwp, "loss": loss,
+                "angle": tilt, "aspect": azimuth,
+                "pvtechchoice": "crystSi", "mountingplace": "free",
+                "outputformat": "json",
+            },
+            timeout=PVGIS_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.Timeout:
+        print("  ⚠️  PVGIS: timeout connessione")
+    except requests.exceptions.ConnectionError:
+        print("  ⚠️  PVGIS: impossibile connettersi (verifica connessione internet)")
+    except Exception as e:
+        print(f"  ⚠️  PVGIS /PVcalc errore: {e}")
+    return None
+
+
+def ottieni_irradiazione_pvgis(lat: float, lon: float):
+    """
+    Chiama PVGIS API v5.2 — endpoint /MRcalc.
+    Restituisce il JSON con irradiazione mensile orizzontale e su piano ottimale, oppure None.
+    """
+    try:
+        resp = requests.get(
+            f"{PVGIS_BASE_URL}/MRcalc",
+            params={
+                "lat": lat, "lon": lon,
+                "horirrad": 1, "optrad": 1,
+                "outputformat": "json",
+            },
+            timeout=PVGIS_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"  ⚠️  PVGIS /MRcalc errore: {e}")
+    return None
+
+
+def stampa_report_pvgis(dati_pv, dati_irr, num_pannelli: int, potenza_pannello_kwp: float,
+                         tech_info: dict, citta: str):
+    """
+    Stampa il report completo: irradiazione mensile, produzione stimata e CO₂ evitata.
+    """
+    print(f"\n{'='*60}")
+    print(f"  ☀️  ANALISI PVGIS — {citta.upper()}")
+    print(f"{'='*60}")
+
+    # --- Irradiazione mensile ---
+    if dati_irr:
+        try:
+            mesi_irr = dati_irr["outputs"]["monthly"]["fixed"]
+            print(f"\n  📊 Irradiazione mensile (kWh/m²)")
+            print(f"  {'Mese':<6} {'Orizz. H(h)':<16} {'Ottimale H(opt)'}")
+            for i, m in enumerate(mesi_irr):
+                h_h   = m.get("H(h)_m",     m.get("Hh",    0))
+                h_opt = m.get("H(i_opt)_m", m.get("Hiopt", 0))
+                nome  = MESI_IT[i] if i < 12 else f"M{i+1}"
+                print(f"  {nome:<6} {h_h:<16.1f} {h_opt:.1f}")
+        except (KeyError, TypeError) as e:
+            print(f"  ⚠️  Dati irradiazione non disponibili: {e}")
+
+    # --- Produzione PV mensile ---
+    if dati_pv:
+        try:
+            out_mensili  = dati_pv["outputs"]["monthly"]["fixed"]
+            out_annuale  = dati_pv["outputs"]["totals"]["fixed"]
+
+            e_ann_1kwp   = out_annuale.get("E_y", 0)            # kWh/anno per 1 kWp
+            h_irr_ann    = out_annuale.get("H(i)_y", out_annuale.get("H(i)_m", 0))
+
+            potenza_tot_kwp  = num_pannelli * potenza_pannello_kwp
+            prod_tot_ann_kwh = e_ann_1kwp * potenza_tot_kwp
+
+            print(f"\n  ⚡ Produzione stimata — {num_pannelli} pannelli × {potenza_pannello_kwp*1000:.0f} W")
+            print(f"     Potenza totale impianto: {potenza_tot_kwp:.2f} kWp")
+            print(f"  {'Mese':<6} {'E/mese (1kWp)':<18} {'E/mese impianto (kWh)'}")
+            for i, m in enumerate(out_mensili):
+                e_m   = m.get("E_m", 0)
+                nome  = MESI_IT[i] if i < 12 else f"M{i+1}"
+                print(f"  {nome:<6} {e_m:<18.1f} {e_m * potenza_tot_kwp:.1f}")
+
+            print(f"  {'─'*56}")
+            print(f"  📈 Produzione annua (1 kWp):    {e_ann_1kwp:.0f} kWh/anno")
+            print(f"  📈 Produzione annua (impianto): {prod_tot_ann_kwh:.0f} kWh/anno")
+            print(f"  🌞 Irradiazione piano inclinato:{h_irr_ann:.0f} kWh/m²/anno")
+            print(f"  ⚙️  Tecnologia:    {tech_info['nome']}")
+            print(f"  📐 Inclinazione:  {INCLINAZIONE_DEFAULT}° | Orientamento: "
+                  f"{'Sud' if ORIENTAMENTO_DEFAULT == 0 else str(ORIENTAMENTO_DEFAULT) + '°'}")
+            print(f"  🔧 Perdite sistema: {PERDITE_SISTEMA}%")
+
+            co2_kg = prod_tot_ann_kwh * CO2_COEFF_KG_KWH
+            print(f"\n  🌿 CO₂ evitata/anno: {co2_kg:.0f} kg  ({co2_kg/1000:.2f} ton)")
+        except (KeyError, TypeError) as e:
+            print(f"  ⚠️  Dati produzione non disponibili: {e}")
+
+    print(f"{'='*60}\n")
+
+
 def filtra_punti_unici(detections, soglia_metri):
     """Fonde rilevamenti multipli dello stesso pannello fisico."""
     unique = []
@@ -461,6 +610,27 @@ def main():
     print(f"\n  Tecnologia : {tech_info['nome']}")
     print(f"  γ          : {gamma_corrente} °C⁻¹  |  η_nom : {eta_nom_corrente:.0%}")
     print(f"  T_amb      : {t_amb_corrente}°C  |  ε (vetro) : {EMISSIVITA}  |  {sdk_stato}\n")
+
+    # 3d. Città per analisi PVGIS
+    citta_input = input("🌍 Città di installazione impianto (INVIO = salta analisi PVGIS): ").strip()
+    pvgis_lat = pvgis_lon = pvgis_citta_display = None
+    potenza_pannello_kwp = POTENZA_PANNELLO_KWP
+    if citta_input:
+        pvgis_lat, pvgis_lon, pvgis_citta_display = geocodifica_citta(citta_input)
+        if pvgis_lat:
+            print(f"  📍 {pvgis_citta_display}")
+            print(f"     Coordinate: {pvgis_lat:.4f}°N, {pvgis_lon:.4f}°E")
+            pot_input = input(
+                f"  ⚡ Potenza per pannello [kWp] (INVIO = {POTENZA_PANNELLO_KWP} kWp): "
+            ).strip()
+            if pot_input:
+                try:
+                    potenza_pannello_kwp = float(pot_input)
+                except ValueError:
+                    potenza_pannello_kwp = POTENZA_PANNELLO_KWP
+            print(f"  ✅ Potenza pannello: {potenza_pannello_kwp} kWp\n")
+        else:
+            print(f"  ⚠️  Città non trovata — analisi PVGIS saltata.\n")
 
     # 4. Setup geo
     affine, geo_transformer = get_geo_tools(ORIGINAL_MOSAIC_PATH)
@@ -672,6 +842,24 @@ def main():
     print(f"   - {OUTPUT_GEOJSON}")
     print(f"   - {OUTPUT_MOSAIC_MARKED}")
     print(f"   - {VIS_OUTPUT_DIR}/ (patch annotate)")
+
+    # 11. Analisi PVGIS
+    if pvgis_lat is not None and len(final_panels) > 0:
+        print("\n🔄 Recupero dati solari da PVGIS (JRC)...")
+        dati_pv  = ottieni_dati_pvgis(
+            pvgis_lat, pvgis_lon,
+            peakpower_kwp=potenza_pannello_kwp,
+        )
+        dati_irr = ottieni_irradiazione_pvgis(pvgis_lat, pvgis_lon)
+        if dati_pv or dati_irr:
+            stampa_report_pvgis(
+                dati_pv, dati_irr,
+                len(final_panels), potenza_pannello_kwp,
+                tech_info, citta_input,
+            )
+        else:
+            print("  ⚠️  Nessun dato PVGIS disponibile.\n")
+
     print("🎯 PROCEDURA COMPLETATA.\n")
 
 

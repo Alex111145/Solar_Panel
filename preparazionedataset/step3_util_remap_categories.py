@@ -29,21 +29,24 @@ def get_dataset_selection(base_dir):
         print("❌ Scelta non valida.")
 
 def main():
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DinoMask")
     dataset_name = get_dataset_selection(BASE_DIR)
     
     sets = ["train", "valid", "test"]
     file_paths = {}
     global_categories = {} # name -> id_originale
     
-    # 1. Analisi preliminare
+    # 1. Analisi preliminare — train è sorgente canonica degli ID
     for s in sets:
         path = os.path.join(BASE_DIR, "datasets", dataset_name, s, "_annotations.coco.json")
         if os.path.exists(path):
             file_paths[s] = path
             data = load_json(path)
             for cat in data.get('categories', []):
-                global_categories[cat['name']] = cat['id']
+                # Non sovrascrivere: il primo split che definisce la categoria
+                # (train) determina l'ID canonico
+                if cat['name'] not in global_categories:
+                    global_categories[cat['name']] = cat['id']
 
     if not global_categories:
         print("❌ Nessun file COCO trovato nelle sottocartelle.")

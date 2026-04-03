@@ -20,7 +20,6 @@ train.py - Training MaskDINO Solar Panels (v5 - Swin-L)
 import os
 import sys
 import json
-import shutil
 import math
 import torch
 import detectron2.data.transforms as T
@@ -46,104 +45,6 @@ VALID_IMG  = os.path.join(BASE_DIR, "datasets", DATASET_FOLDER_NAME, "valid")
 TRAIN_NAME = "solar_train_swinL"
 VALID_NAME = "solar_valid_swinL"
 OUTPUT_DIR = os.path.join(BASE_DIR, "/workspace/cortoswin")
-
-# ==========================================================================================
-# SOGLIE FILTRAGGIO ANNOTAZIONI BORDER
-# ==========================================================================================
-AR_THRESH   = 0.25
-FILL_THRESH = 0.55
-MIN_AREA    = 200
-
-# ==========================================================================================
-# 1. FILTRAGGIO ANNOTAZIONI BORDER
-# ==========================================================================================
-
-def _polygon_area(segmentation):
-    if not segmentation or not isinstance(segmentation[0], list):
-        return 0
-    coords = segmentation[0]
-    xs, ys = coords[0::2], coords[1::2]
-    n = len(xs)
-    if n < 3:
-        return 0
-    area = sum(xs[i] * ys[(i+1) % n] - xs[(i+1) % n] * ys[i] for i in range(n))
-    return abs(area) / 2.0
-
-
-def _is_border_panel(ann):
-    bbox = ann.get('bbox', [0, 0, 1, 1])
-    area = ann.get('area', 0)
-    seg  = ann.get('segmentation', [])
-    w, h = bbox[2], bbox[3]
-
-    if h <= 0 or w <= 0:
-        return True
-    if area < MIN_AREA:
-        return True
-    if w / h < AR_THRESH or h / w < AR_THRESH:
-        return True
-
-    poly_a = _polygon_area(seg)
-    bbox_a = w * h
-    if poly_a > 0 and bbox_a > 0:
-        fill = min(poly_a, bbox_a) / max(poly_a, bbox_a)
-        if fill < FILL_THRESH:
-            return True
-
-    return False
-
-
-def filter_border_annotations(json_path):
-    if not os.path.exists(json_path):
-        print(f"❌ JSON non trovato: {json_path}")
-        sys.exit(1)
-
-    backup = json_path.replace(".json", "_backup_original.json")
-    source = backup if os.path.exists(backup) else json_path
-
-    with open(source, 'r') as f:
-        data = json.load(f)
-
-    anns_orig = data.get('annotations', [])
-    anns_keep = [a for a in anns_orig if not _is_border_panel(a)]
-    n_removed = len(anns_orig) - len(anns_keep)
-
-    if not os.path.exists(backup):
-        shutil.copy2(json_path, backup)
-
-    data['annotations'] = anns_keep
-    ids_with_ann = set(a['image_id'] for a in anns_keep)
-    data['images'] = [img for img in data.get('images', []) if img['id'] in ids_with_ann]
-
-    with open(json_path, 'w') as f:
-        json.dump(data, f)
-
-    split = "TRAIN" if "train" in json_path else "VALID"
-    pct = n_removed / len(anns_orig) * 100 if anns_orig else 0
-    print(f"  [{split}] Annotazioni: {len(anns_orig)} → {len(anns_keep)} "
-          f"(rimosse {n_removed} border, {pct:.1f}%)")
-
-
-def clean_and_verify_dataset(json_path):
-    if not os.path.exists(json_path):
-        return
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    initial = len(data['annotations'])
-    cleaned = [
-        a for a in data['annotations']
-        if a.get('area', 0) > 50
-        and a['bbox'][2] > 5
-        and a['bbox'][3] > 5
-        and len(a.get('segmentation', [])) > 0
-    ]
-    removed = initial - len(cleaned)
-    if removed > 0:
-        data['annotations'] = cleaned
-        with open(json_path, 'w') as f:
-            json.dump(data, f)
-        print(f"  Pulizia: rimosse {removed} annotazioni corrotte.")
-
 
 def get_classes_from_json(json_path):
     with open(json_path, 'r') as f:
@@ -283,16 +184,16 @@ def setup(args=None):
     cfg.SOLVER.WEIGHT_DECAY        = 0.05
 
     # Best AP a iter ~2000 → fermiamo a 5000 con step decay a 3000/4500
-    cfg.SOLVER.MAX_ITER     = 800   # best AP atteso ~iter 2000
-    cfg.SOLVER.STEPS        = (400,600)
-    cfg.SOLVER.WARMUP_ITERS = 50
+    cfg.SOLVER.MAX_ITER     = 5000   # best AP atteso ~iter 2000
+    cfg.SOLVER.STEPS        = (3000,4500)
+    cfg.SOLVER.WARMUP_ITERS = 200
 
     cfg.SOLVER.CLIP_GRADIENTS.ENABLED    = True
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE  = "norm"
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 1.0
 
-    cfg.TEST.EVAL_PERIOD         = 100
-    cfg.SOLVER.CHECKPOINT_PERIOD = 100
+    cfg.TEST.EVAL_PERIOD         =500
+    cfg.SOLVER.CHECKPOINT_PERIOD = 500
 
     cfg.DATASETS.TRAIN = (TRAIN_NAME,)
     cfg.DATASETS.TEST  = (VALID_NAME,)
@@ -340,16 +241,6 @@ def setup(args=None):
 # ==========================================================================================
 
 def main(args=None):
-    print("\n🔧 Pre-processing dataset...")
-
-    print("\n📐 Filtraggio annotazioni border:")
-    filter_border_annotations(TRAIN_JSON)
-    filter_border_annotations(VALID_JSON)
-
-    print("\n🧹 Pulizia annotazioni corrotte:")
-    clean_and_verify_dataset(TRAIN_JSON)
-    clean_and_verify_dataset(VALID_JSON)
-
     for name in [TRAIN_NAME, VALID_NAME]:
         if name in DatasetCatalog:
             DatasetCatalog.remove(name)
@@ -375,7 +266,7 @@ def main(args=None):
     ])
 
     # resume=False — parte sempre da zero con pesi Swin-L pre-trainati
-    trainer.resume_or_load(resume=True)
+    trainer.resume_or_load(resume=False)
     return trainer.train()
 
 

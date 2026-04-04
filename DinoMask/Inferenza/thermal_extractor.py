@@ -54,52 +54,80 @@ H30T_HEIGHT_PX = 512
 _SDK_AVAILABLE = False
 _DJI_IRP_CLI   = None
 
-# Cartella con le .so DJI (stessa dir dello script)
-_LIBS_DIR = os.path.dirname(os.path.abspath(__file__))
+# Cartella base dello script
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Sottocartella platform-specific: sdk/linux  oppure  sdk/windows
+_PLATFORM     = "windows" if os.name == "nt" else "linux"
+_LIBS_DIR     = os.path.join(_BASE_DIR, "sdk", _PLATFORM)
+
+# Estensione librerie native per piattaforma
+_LIB_EXT      = ".dll" if os.name == "nt" else ".so"
+_IRP_EXE      = "dji_irp.exe" if os.name == "nt" else "dji_irp"
+_LIBDIRP_NAME = "libdirp" + _LIB_EXT
+
 
 def _init_dji_sdk():
-    """Carica libdirp.so e tutte le dipendenze DJI. Ritorna True se OK."""
+    """
+    Carica libdirp + dipendenze DJI dalla cartella sdk/<platform>/.
+    Ritorna True se l'init ha successo.
+    """
     import ctypes
-    libdirp_path = os.path.join(_LIBS_DIR, "libdirp.so")
+
+    libdirp_path = os.path.join(_LIBS_DIR, _LIBDIRP_NAME)
     if not os.path.exists(libdirp_path):
         return False
-    # Carica dipendenze nell'ordine corretto (RTLD_GLOBAL)
-    for dep in ["libMicroJPEG_Release_x64.so", "libMicroIA_Release_x64.so",
-                "libMicroTA_Release_x64.so", "libv_cirp.so", "libv_dirp.so",
-                "libv_girp.so", "libv_hirp.so", "libv_iirp.so"]:
-        p = os.path.join(_LIBS_DIR, dep)
-        if os.path.exists(p):
-            try:
-                ctypes.CDLL(p, mode=ctypes.RTLD_GLOBAL)
-            except Exception:
-                pass
+
+    # Dipendenze Linux (.so) — su Windows le .dll si caricano automaticamente
+    if os.name != "nt":
+        for dep in [
+            "libMicroJPEG_Release_x64.so", "libMicroIA_Release_x64.so",
+            "libMicroTA_Release_x64.so",   "libv_cirp.so", "libv_dirp.so",
+            "libv_girp.so", "libv_hirp.so", "libv_iirp.so",
+        ]:
+            p = os.path.join(_LIBS_DIR, dep)
+            if os.path.exists(p):
+                try:
+                    ctypes.CDLL(p, mode=ctypes.RTLD_GLOBAL)
+                except Exception:
+                    pass
+
     try:
         from dji_thermal_sdk.dji_sdk import dji_init
-        dji_init(libdirp_path, osname="linux")
+        dji_init(libdirp_path, osname=_PLATFORM)
         return True
     except Exception:
         return False
 
+
 try:
     import dji_thermal_sdk as _dji_mod
     _SDK_AVAILABLE = _init_dji_sdk()
+    if _SDK_AVAILABLE:
+        print(f"[DJI thermal] ✅ SDK Python attivo  ({_LIBS_DIR})")
+    else:
+        print(f"[DJI thermal] ❌ SDK init fallito — {_LIBDIRP_NAME} non trovato in {_LIBS_DIR}")
 except ImportError:
-    pass
+    print("[DJI thermal] ❌ dji_thermal_sdk non installato  (pip install dji-thermal-sdk)")
 
 if not _SDK_AVAILABLE:
     for _candidate in [
-        "dji_irp",
+        _IRP_EXE,
+        os.path.join(_LIBS_DIR, _IRP_EXE),   # sdk/linux/dji_irp  o  sdk/windows/dji_irp.exe
         "/usr/local/bin/dji_irp",
-        os.path.join(_LIBS_DIR, "dji_irp"),
     ]:
         try:
             if os.path.isfile(_candidate) or subprocess.run(
-                ["which", _candidate], capture_output=True
+                ["where" if os.name == "nt" else "which", _candidate],
+                capture_output=True
             ).returncode == 0:
                 _DJI_IRP_CLI = _candidate
+                print(f"[DJI thermal] ⚠️  Fallback CLI: {_DJI_IRP_CLI}")
                 break
         except Exception:
             pass
+    if not _DJI_IRP_CLI:
+        print("[DJI thermal] ⚠️  Fallback raw parsing (meno accurato, solo H20T/H30T/XT2)")
 
 
 # ==============================================================================
@@ -425,13 +453,16 @@ def get_temperature_matrix(rjpeg_path: str,
     """
     # --- Strategia 1: SDK Python ---
     if _SDK_AVAILABLE:
+        print(f"  [thermal] Strategia: SDK Python (libdirp.so) → {os.path.basename(rjpeg_path)}")
         return _extract_via_sdk(rjpeg_path, emissivity)
 
     # --- Strategia 2: CLI dji_irp ---
     if _DJI_IRP_CLI:
+        print(f"  [thermal] Strategia: CLI dji_irp → {os.path.basename(rjpeg_path)}")
         return _extract_via_cli(rjpeg_path)
 
     # --- Strategia 3: Parsing raw ---
+    print(f"  [thermal] Strategia: raw parsing (fallback) → {os.path.basename(rjpeg_path)}")
     return _extract_via_raw(rjpeg_path)
 
 
@@ -666,6 +697,182 @@ def extract_from_patch_region(
     if mode == "max":
         return float(np.max(values))
     return float(np.mean(values))
+
+
+# ==============================================================================
+# ESTRAZIONE TEMPERATURA VIA COORDINATE GPS (più accurata di pixel offset)
+# ==============================================================================
+
+def _gps_to_photo_pixel(
+    lat_panel: float, lon_panel: float,
+    lat_photo: float, lon_photo: float,
+    altitude_m: float,
+    hfov_deg: float, vfov_deg: float,
+    img_w: int, img_h: int,
+    heading_deg: float = 0.0,
+) -> tuple[int, int] | None:
+    """
+    Converte coordinate GPS (lat_panel, lon_panel) in pixel (col, row)
+    nella foto termica drone, usando la posizione GPS del centro foto,
+    la quota AGL e il FOV del sensore.
+
+    heading_deg: orientamento della camera (gimbal yaw, 0=Nord, 90=Est).
+    Restituisce (col, row) o None se il pannello è fuori dal frame.
+    """
+    import math
+
+    # Approssimazione planare (valida su distanze < 500 m)
+    DEG_TO_M_LAT = 111_320.0
+    DEG_TO_M_LON = 111_320.0 * math.cos(math.radians(lat_photo))
+
+    dx_m = (lon_panel - lon_photo) * DEG_TO_M_LON   # Est positivo
+    dy_m = (lat_panel - lat_photo) * DEG_TO_M_LAT   # Nord positivo
+
+    # Ruota rispetto all'orientamento della camera
+    heading_rad = math.radians(heading_deg)
+    dx_cam =  dx_m * math.cos(heading_rad) + dy_m * math.sin(heading_rad)
+    dy_cam = -dx_m * math.sin(heading_rad) + dy_m * math.cos(heading_rad)
+
+    # Footprint del sensore a terra
+    if altitude_m < 0.5:
+        return None
+    footprint_w = 2.0 * altitude_m * math.tan(math.radians(hfov_deg / 2.0))
+    footprint_h = 2.0 * altitude_m * math.tan(math.radians(vfov_deg / 2.0))
+
+    # Pixel: centro = (img_w/2, img_h/2)
+    # dx_cam positivo → pixel a destra; dy_cam positivo → pixel in alto
+    col = int(img_w / 2.0 + dx_cam / footprint_w * img_w)
+    row = int(img_h / 2.0 - dy_cam / footprint_h * img_h)
+
+    if 0 <= col < img_w and 0 <= row < img_h:
+        return col, row
+    return None
+
+
+def extract_at_gps(
+    rjpeg_path: str,
+    lat_panel: float,
+    lon_panel: float,
+    mode: str = "max",
+    radius_px: int = 8,
+    emissivity: float = EMISSIVITY_GLASS,
+) -> float | None:
+    """
+    Estrae la temperatura nella foto drone alla posizione GPS del pannello,
+    usando il mapping GPS → pixel tramite EXIF (lat/lon/alt/FOV/heading).
+
+    Questo è più accurato di extract_from_patch_region che usava pixel offset
+    dell'ortomosaico (coordinate diverse dalla foto drone).
+
+    Args:
+        rjpeg_path : foto raw DJI RJPEG
+        lat_panel  : latitudine del centroide del pannello
+        lon_panel  : longitudine del centroide del pannello
+        mode       : "max" per hotspot, "mean" per pannello sano
+        radius_px  : raggio (pixel) del patch estratto attorno al centroide
+        emissivity : 0.95 (vetro FV)
+
+    Returns:
+        temperatura °C, oppure None
+    """
+    # 1. Leggi GPS della foto drone (XMP DJI → fallback EXIF PIL DMS)
+    lat_photo = 0.0
+    lon_photo = 0.0
+    alt_photo = 0.0
+    heading   = 0.0
+
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS, GPSTAGS
+        import re as _re
+
+        img_pil = Image.open(rjpeg_path)
+
+        # Strategia A: XMP DJI (presente in alcuni RJPEG DJI)
+        xmp = img_pil.info.get("xmp", b"").decode("utf-8", errors="ignore")
+        def _xget(tag):
+            m = _re.search(rf'drone-dji:{tag}="([^"]+)"', xmp)
+            return m.group(1) if m else None
+
+        _lat_x = _xget("GpsLatitude")
+        _lon_x = _xget("GpsLongitude")
+        if _lat_x and _lon_x:
+            lat_photo = float(_lat_x)
+            lon_photo = float(_lon_x)
+            alt_photo = abs(float(_xget("RelativeAltitude") or "0"))
+            heading   = float(_xget("GimbalYawDegree") or _xget("FlightYawDegree") or "0")
+
+        # Strategia B: EXIF standard in formato DMS (PIL._getexif)
+        if lat_photo == 0.0 and lon_photo == 0.0:
+            exif = img_pil._getexif() or {}
+            gps_raw = None
+            for tag_id, val in exif.items():
+                if TAGS.get(tag_id) == "GPSInfo":
+                    gps_raw = {GPSTAGS.get(k, k): v for k, v in val.items()}
+                    break
+            if gps_raw:
+                def _dms(dms, ref):
+                    d, m, s = dms
+                    dec = float(d) + float(m) / 60.0 + float(s) / 3600.0
+                    return -dec if ref in ("S", "W") else dec
+
+                lat_dms = gps_raw.get("GPSLatitude")
+                lon_dms = gps_raw.get("GPSLongitude")
+                if lat_dms and lon_dms:
+                    lat_photo = _dms(lat_dms, gps_raw.get("GPSLatitudeRef",  "N"))
+                    lon_photo = _dms(lon_dms, gps_raw.get("GPSLongitudeRef", "E"))
+                    # GPSAltitude è ASL; usiamo il default AGL se troppo alto
+                    alt_asl = float(gps_raw.get("GPSAltitude", 0.0))
+                    alt_photo = alt_asl if alt_asl <= 80.0 else H30T_ALT_DEFAULT
+                    heading = float(gps_raw.get("GPSTrack", 0.0))
+
+    except Exception:
+        pass
+
+    if lat_photo == 0.0 and lon_photo == 0.0:
+        return None
+
+    # 2. Recupera risoluzione e FOV
+    meta = get_exif_metadata(rjpeg_path)
+    w    = meta["image_width"]
+    h    = meta["image_height"]
+    hfov = meta["fov_h_deg"]
+    vfov = meta["fov_v_deg"]
+    if alt_photo < 0.5:
+        alt_photo = meta["altitude_m"]
+
+    # 3. Converti GPS → pixel nella foto
+    px = _gps_to_photo_pixel(lat_panel, lon_panel,
+                              lat_photo, lon_photo,
+                              alt_photo, hfov, vfov,
+                              w, h, heading)
+    if px is None:
+        return None
+
+    col, row = px
+
+    # 4. Estrai matrice temperature e campiona il patch
+    temp_matrix = get_temperature_matrix(rjpeg_path, emissivity)
+    if temp_matrix.size == 0:
+        return None
+
+    H_t, W_t = temp_matrix.shape
+    # Ricala col/row se la risoluzione termica differisce da quella EXIF
+    col_t = int(col * W_t / w)
+    row_t = int(row * H_t / h)
+
+    r0 = max(0, row_t - radius_px)
+    r1 = min(H_t, row_t + radius_px + 1)
+    c0 = max(0, col_t - radius_px)
+    c1 = min(W_t, col_t + radius_px + 1)
+
+    patch = temp_matrix[r0:r1, c0:c1]
+    if patch.size == 0:
+        return None
+
+    if mode == "max":
+        return float(patch.max())
+    return float(patch.mean())
 
 
 # ==============================================================================

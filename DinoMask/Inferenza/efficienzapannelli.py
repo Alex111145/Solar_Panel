@@ -638,18 +638,20 @@ def chiedi_parametri_globali() -> dict:
     print("=" * 60)
 
     return {
-        "city":       "Auto-GPS",
-        "esh":        0.0,
-        "giorni":     0.0,
-        "tipo":       pannello["tipo"],
-        "eta_nom":    pannello["eta_nom"],
-        "gamma":      pannello["gamma"],
-        "emissivita": EMISSIVITA_VETRO,
-        "irr":        IRR_DEFAULT,
-        "costo":      COSTO_KWH,
-        "t_amb":      25.0,
-        "t_sano":     None,
-        "area_modulo": area_modulo, # Passata alla diagnostica
+        "city":        "Auto-GPS",
+        "esh":         0.0,
+        "giorni":      0.0,
+        "tipo":        pannello["tipo"],
+        "eta_nom":     pannello["eta_nom"],
+        "gamma":       pannello["gamma"],
+        "emissivita":  EMISSIVITA_VETRO,
+        "irr":         IRR_DEFAULT,
+        "costo":       COSTO_KWH,
+        "t_amb":       25.0,
+        "t_sano":      None,
+        "area_modulo": area_modulo,
+        "w_mod":       w_mod,    # larghezza singolo pannello [m]
+        "h_mod":       h_mod,    # altezza singolo pannello [m]
     }
 
 def calcola_diagnostica_dict(t_hotspot_app, area_m2_ignored, params):
@@ -675,9 +677,11 @@ def calcola_diagnostica_dict(t_hotspot_app, area_m2_ignored, params):
     delta_t          = t_reale_hotspot - t_reale_sano
 
     # Efficienze
+    # SoH riferito a STC (eta_nom @ 25°C = 100%) — non al pannello sano della scena,
+    # altrimenti quando t_panel = t_sano il risultato è sempre 100%.
     eta_sano    = eta_reale(eta_nom, gamma, t_reale_sano)
     eta_hotspot = eta_reale(eta_nom, gamma, t_reale_hotspot)
-    soh         = (eta_hotspot / eta_sano * 100.0) if eta_sano != 0 else 0.0
+    soh         = (eta_hotspot / eta_nom * 100.0) if eta_nom != 0 else 0.0
 
     # Potenze
     p_attesa   = irr * area * eta_sano

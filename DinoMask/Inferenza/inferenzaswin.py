@@ -7,7 +7,7 @@ Coerente con il training v4:
   - Risoluzione test 1600px (identica al training)
   - Soglia detection 0.37
   - NMS post-processing
-  - Geolocalizzazione GeoTIFF → KML/KMZ/CSV/GeoJSON
+  - Geolocalizzazione GeoTIFF → CSV
   - Fusione duplicati per distanza
   - Calcolo area degradata (GSD²)
   - Selezione casuale N immagini
@@ -21,18 +21,12 @@ import glob
 import re
 import math
 import warnings
-import csv
-import json
-import shutil
 import cv2
 import torch
 import numpy as np
 import rasterio
-import simplekml
 import random
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Point, Polygon
 from pyproj import Transformer
 
 os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
@@ -40,7 +34,6 @@ warnings.filterwarnings("ignore")
 
 from detectron2.config import get_cfg
 from detectron2.engine import DefaultPredictor
-from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog
 from detectron2.layers import nms
 
@@ -55,11 +48,11 @@ try:
     HAS_EFFICIENCY = True
 except ImportError:
     HAS_EFFICIENCY = False
-    print("⚠️  efficienzapannelli.py non trovato — KML senza dati efficienza")
+    print("⚠️  efficienzapannelli.py non trovato — dati efficienza non disponibili")
 
 try:
-    from thermal_extractor import (get_ambient_temperature, get_gsd as get_drone_gsd,
-                                    extract_from_patch_region, pixels_to_area_m2)
+    from thermal_extractor import (get_ambient_temperature,
+                                    extract_at_gps, pixels_to_area_m2)
     HAS_THERMAL = True
 except ImportError:
     HAS_THERMAL = False
@@ -84,12 +77,9 @@ DRONE_PHOTOS_DIR     = os.path.join(BASE_DIR, "foto_drone")          # foto raw 
 ORIGINAL_MOSAIC_PATH = os.path.join(BASE_DIR, "ortomosaico.tif")
 TFW_PATH             = os.path.join(BASE_DIR, "ortomosaico.tfw")
 
-VIS_OUTPUT_DIR       = os.path.join(BASE_DIR, "inference_results")
-OUTPUT_MOSAIC_MARKED = os.path.join(BASE_DIR, "Mosaico_Finale_Rilevato.jpg")
-OUTPUT_KML           = os.path.join(BASE_DIR, "Mappa_Pannelli.kml")
-OUTPUT_KMZ           = os.path.join(BASE_DIR, "Mappa_Pannelli.kmz")
-OUTPUT_CSV           = os.path.join(BASE_DIR, "Rilevamenti_Pannelli.csv")
-OUTPUT_GEOJSON       = os.path.join(BASE_DIR, "Rilevamenti_Pannelli.geojson")
+OUTPUT_MOSAIC_MARKED  = os.path.join(BASE_DIR, "Mosaico_Finale_Rilevato.jpg")
+OUTPUT_MOSAIC_DAMAGED = os.path.join(BASE_DIR, "Mosaico_Finale_Danneggiati.jpg")
+OUTPUT_CSV            = os.path.join(BASE_DIR, "Rilevamenti_Pannelli.csv")
 
 YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "swin", "maskdino_swinl_bs16_50ep.yaml")
 NUM_CLASSES = 2  # Pannello Danneggiato + Pannello Sano
@@ -239,32 +229,6 @@ def esporta_csv(panels, path):
     print(f"✅ CSV salvato: {path}  ({len(df)} righe)")
 
 
-def esporta_geojson(panels, path):
-    geometries = []
-    attrs      = []
-    for p in panels:
-        if p.get('contour') is not None:
-            pts = [(int(c[0][0]), int(c[0][1])) for c in p['contour']]
-            geom = Polygon(pts) if len(pts) >= 3 else Point(p['lon'], p['lat'])
-        else:
-            geom = Point(p['lon'], p['lat'])
-        geometries.append(geom)
-        attrs.append({
-            "classe":  CLASS_NAMES.get(p.get('class_id', 1), "Pannello Sano"),
-            "score":   round(p['score'], 4),
-            "area_m2": p.get('area_m2', None),
-        })
-    gdf = gpd.GeoDataFrame(attrs, geometry=geometries, crs="EPSG:4326")
-    gdf.to_file(path, driver="GeoJSON")
-    print(f"✅ GeoJSON salvato: {path}  ({len(gdf)} features)")
-
-
-def esporta_kmz(kml_path, kmz_path):
-    import zipfile
-    with zipfile.ZipFile(kmz_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(kml_path, arcname="doc.kml")
-    print(f"✅ KMZ salvato: {kmz_path}")
-
 
 def setup_cfg(weights_path):
     cfg = get_cfg()
@@ -310,7 +274,6 @@ def main():
     print(f"  Soglia detection: {SOGLIA_DETECTION:.0%} | NMS: {NMS_THRESH}")
     print(f"  Risoluzione: 800-1600px\n")
 
-    os.makedirs(VIS_OUTPUT_DIR, exist_ok=True)
 
     # 2. Lettura GSD dal GeoTIFF
     gsd_m = leggi_gsd(ORIGINAL_MOSAIC_PATH, TFW_PATH)
@@ -343,7 +306,7 @@ def main():
     # 4. Setup geo e calcolo centroide per API esterne
     affine, geo_transformer, lat_c, lon_c = get_geo_tools(ORIGINAL_MOSAIC_PATH)
     if not affine:
-        print("⚠️  GeoTIFF non trovato — KML/KMZ/CSV/GeoJSON e API meteo/solari saltati.\n")
+        print("⚠️  GeoTIFF non trovato — CSV e API meteo/solari saltati.\n")
     else:
         print(f"📍 Centroide Ortomosaico estratto: Lat {lat_c:.6f}, Lon {lon_c:.6f}\n")
 
@@ -410,48 +373,41 @@ def main():
         if num_panels == 0:
             continue
 
-        try:
-            meta = MetadataCatalog.get(cfg.DATASETS.TRAIN[0])
-        except Exception:
-            meta = MetadataCatalog.get("__unused")
-
-        v = Visualizer(img[:, :, ::-1], meta, scale=1.0)
-        v.overlay_instances(masks=instances.pred_masks)
-        for k in range(num_panels):
-            score_pct = f"{int(instances.scores[k].item() * 100)}%"
-            v.draw_text(score_pct, instances.pred_boxes.tensor[k][:2])
-        out = v.get_output()
-        cv2.imwrite(
-            os.path.join(VIS_OUTPUT_DIR, f"res_{filename}"),
-            out.get_image()[:, :, ::-1]
-        )
-
         if affine and geo_transformer:
             masks    = instances.pred_masks.numpy()
             boxes    = instances.pred_boxes.tensor.numpy()
             scores   = instances.scores.numpy()
             classes  = instances.pred_classes.numpy() if instances.has("pred_classes") else np.zeros(num_panels, dtype=int)
 
+            _ker_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            _ker_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
             for k in range(num_panels):
                 patch_mask = masks[k].astype(bool)
-                mask_u8     = (patch_mask.astype("uint8") * 255)
-                contours, _ = cv2.findContours(
-                    mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
+                mask_u8    = patch_mask.astype("uint8") * 255
 
-                global_contour = None
+                # Pulizia maschera e rettangolo ruotato minimo
+                mask_clean = cv2.morphologyEx(mask_u8,    cv2.MORPH_CLOSE, _ker_close, iterations=2)
+                mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN,  _ker_open,  iterations=1)
+                contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                contours    = [c for c in contours if cv2.contourArea(c) > 200]
+
+                global_box_pts = None
                 if contours:
-                    c  = max(contours, key=cv2.contourArea)
-                    M  = cv2.moments(c)
+                    c_big = max(contours, key=cv2.contourArea)
+                    M = cv2.moments(c_big)
                     if M["m00"] != 0:
                         cx_local = int(M["m10"] / M["m00"])
                         cy_local = int(M["m01"] / M["m00"])
                     else:
                         cx_local = int((boxes[k][0] + boxes[k][2]) / 2)
                         cy_local = int((boxes[k][1] + boxes[k][3]) / 2)
-                    global_contour = c.copy()
-                    global_contour[:, :, 0] += off_x
-                    global_contour[:, :, 1] += off_y
+                    # rettangolo ruotato in coordinate locali → tradotto in globali
+                    rect      = cv2.minAreaRect(c_big)
+                    local_box = np.int32(cv2.boxPoints(rect))
+                    global_box_pts = local_box.copy()
+                    global_box_pts[:, 0] += off_x
+                    global_box_pts[:, 1] += off_y
                 else:
                     cx_local = int((boxes[k][0] + boxes[k][2]) / 2)
                     cy_local = int((boxes[k][1] + boxes[k][3]) / 2)
@@ -467,12 +423,11 @@ def main():
                 if HAS_THERMAL and HAS_MATCHER and photo_index:
                     best_photo = find_best_photo(lat, lon, photo_index)
                     if best_photo:
-                        gsd_drone = get_drone_gsd(best_photo)
-                        scale = gsd_m / gsd_drone if gsd_drone > 0 else 1.0
-                        mode  = "max" if class_id_k == 0 else "mean"
-                        t_panel = extract_from_patch_region(
-                            best_photo, off_x, off_y, patch_mask,
-                            mode=mode, ortho_to_drone_scale=scale
+                        # Usa coordinate GPS per il mapping pixel nella foto termica —
+                        # più accurato dell'offset pixel ortomosaico→drone.
+                        mode    = "max" if class_id_k == 0 else "mean"
+                        t_panel = extract_at_gps(
+                            best_photo, lat, lon, mode=mode
                         )
                         n_px    = int(np.sum(patch_mask))
                         area_m2 = pixels_to_area_m2(n_px, gsd_m)
@@ -485,7 +440,7 @@ def main():
                     'score':    float(scores[k]),
                     'class_id': class_id_k,
                     'area_m2':  area_m2,
-                    'contour':  global_contour,
+                    'box_pts':  global_box_pts,
                     't_panel':  t_panel,
                 })
 
@@ -494,26 +449,13 @@ def main():
 
     if not raw_detections:
         print("❌ Nessun pannello geolocalizzato.")
-        print(f"✅ Immagini patch salvate in: {VIS_OUTPUT_DIR}")
         sys.exit(0)
 
-    # 6. Fusione duplicati
-    print(f"🔄 Fusione duplicati (soglia: {MERGE_DIST_METERS}m)...")
-    final_panels = filtra_punti_unici(raw_detections, MERGE_DIST_METERS)
-    prima = len(final_panels)
-    final_panels = [p for p in final_panels
-                    if p['score'] >= SCORE_MIN_EXPORT
-                    and (p.get('area_m2') or 0) >= 1.0]
-    scartati = prima - len(final_panels)
-    if scartati > 0:
-        print(f"  Scartati (area < 1 m² = falsi positivi): {scartati}")
-    print(f"  Pannelli unici finali: {len(final_panels)}")
-
-    # 6b. Parametri efficienza e PVGIS automatico
+    # 6b. Parametri efficienza e PVGIS (PRIMA del merge — serve la diagonale pannello)
     eff_params = None
     if HAS_EFFICIENCY:
         print(f"\n{'─'*60}")
-        
+
         # CHIAMATA API PVGIS TRAMITE COORDINATE DEL CENTROIDE
         pvgis_data = None
         if lat_c is not None and lon_c is not None:
@@ -523,108 +465,91 @@ def main():
             except Exception as e:
                 print(f"⚠️  Errore recupero API PVGIS: {e}")
 
-        # Chiede i dati restanti (potenza modulo, prezzo, ecc.)
+        # Chiede tipo pannello + dimensioni fisiche
         eff_params = chiedi_parametri_globali()
 
-        # Inietta i dati scaricati nei parametri globali 
+        # Inietta i dati scaricati nei parametri globali
         if pvgis_data:
             eff_params['esh'] = pvgis_data['esh']
             eff_params['giorni_utili'] = pvgis_data['giorni_utili']
 
-        # Imposta la Temperatura ambiente automatica
+        # Temperatura ambiente automatica
         eff_params['t_amb'] = t_amb_drone
 
-        # Imposta T_sano (il pannello sano più freddo rilevato)
+    # 6. Fusione duplicati — soglia dinamica basata sulla diagonale del pannello
+    if eff_params and eff_params.get('w_mod') and eff_params.get('h_mod'):
+        w_mod = eff_params['w_mod']
+        h_mod = eff_params['h_mod']
+        # Diagonale pannello × 0.9: fonde doppioni sullo stesso pannello
+        # senza toccare pannelli adiacenti (distanza tipica > 0.1m)
+        merge_dist = round(math.sqrt(w_mod**2 + h_mod**2) * 0.9, 3)
+        print(f"\n📐 Merge dinamico: diag({w_mod}m×{h_mod}m)×0.9 = {merge_dist:.2f} m")
+    else:
+        merge_dist = MERGE_DIST_METERS
+        print(f"\n📐 Merge fisso: {merge_dist} m (dimensioni pannello non disponibili)")
+
+    print(f"🔄 Fusione duplicati (soglia: {merge_dist} m)...")
+    final_panels = filtra_punti_unici(raw_detections, merge_dist)
+    prima = len(final_panels)
+    final_panels = [p for p in final_panels
+                    if p['score'] >= SCORE_MIN_EXPORT
+                    and (p.get('area_m2') or 0) >= 1.0]
+    scartati = prima - len(final_panels)
+    if scartati > 0:
+        print(f"  Scartati (area < 1 m² = falsi positivi): {scartati}")
+    print(f"  Pannelli unici finali: {len(final_panels)}")
+
+    # T_sano: calcolato dopo il merge (serve final_panels)
+    if eff_params is not None:
         temp_sani = [
             p['t_panel'] for p in final_panels
             if p.get('class_id') == 1 and p.get('t_panel') is not None
         ]
         if temp_sani:
-            eff_params['t_sano'] = min(temp_sani)
-            print(f"  T_sano (pannello baseline) : {eff_params['t_sano']:.1f} °C")
+            # Pannello sano più CALDO = baseline 100% nelle condizioni di campo attuali.
+            # Pannelli più caldi ancora (hotspot) sono per definizione degradati → SOH < 100%
+            eff_params['t_sano'] = max(temp_sani)
+            print(f"  T_sano baseline (sano più caldo): {eff_params['t_sano']:.1f} °C  "
+                  f"[su {len(temp_sani)} pannelli sani]")
         elif eff_params.get('t_sano') is None:
             eff_params['t_sano'] = t_amb_drone + 10.0
             print(f"  ⚠️  T_sano non trovata — uso fallback: {eff_params['t_sano']:.1f} °C")
 
-    # 7. KML + KMZ
-    kml = simplekml.Kml()
-
-    for idx, p in enumerate(final_panels):
-        classe_nome = CLASS_NAMES.get(p.get('class_id', 1), "Pannello Sano")
-
-        eff = None
-        if eff_params and HAS_EFFICIENCY:
-            t_app = p.get('t_panel') or eff_params.get('t_sano') or (t_amb_drone + 10.0)
-            eff   = calcola_diagnostica_dict(t_app, p.get('area_m2', 1.63), eff_params)
-
-        if eff:
-            colore = eff['kml_color']
-        else:
-            colore = "ff0000ff" if classe_nome == "Pannello Danneggiato" else "ff00cc00"
-
-        if eff:
-            html = (
-                f"<b>ID Pannello:</b> {idx+1}<br/>"
-                f"<b>Classe AI:</b> {classe_nome}<br/>"
-                f"<b>Confidenza:</b> {p['score']:.0%}<br/>"
-                f"<b>Area:</b> {p.get('area_m2', 'N/A')} m²<br/>"
-                f"<hr/>"
-                f"<b>Tecnologia:</b> {eff['tipo_pannello']}<br/>"
-                f"<b>Temp. pannello:</b> {eff['t_reale_hotspot']} °C<br/>"
-                f"<b>Temp. baseline:</b> {eff['t_reale_sano']} °C<br/>"
-                f"<b>ΔT:</b> +{eff['delta_t']} °C<br/>"
-                f"<hr/>"
-                f"<b>Stato:</b> {eff['stato']}<br/>"
-                f"<b>Diagnosi:</b> {eff['diagnosi']}<br/>"
-                f"<b>SoH:</b> {eff['soh']} %<br/>"
-                f"<b>Efficienza:</b> {eff['eta_hotspot_pct']} %<br/>"
-                f"<b>Potenza erogata:</b> {eff['p_erogata_w']} W<br/>"
-                f"<b>Potenza persa:</b> {eff['p_persa_w']} W<br/>"
-                f"<b>Mancato guadagno:</b> -{eff['perdita_euro']} €/anno<br/>"
-            )
-        else:
-            html = (
-                f"<b>ID:</b> {idx+1}<br/>"
-                f"<b>Classe:</b> {classe_nome}<br/>"
-                f"<b>Score:</b> {p['score']:.2f}<br/>"
-                f"<b>Area:</b> {p.get('area_m2', 'N/A')} m²<br/>"
-            )
-
-        pnt = kml.newpoint(
-            name        = f"#{idx+1} {classe_nome}",
-            coords      = [(p['lon'], p['lat'])],
-        )
-        pnt.description = f"<![CDATA[{html}]]>"
-        style = simplekml.Style()
-        style.iconstyle.icon.href  = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png'
-        style.iconstyle.color      = colore
-        style.iconstyle.scale      = 1.4
-        style.labelstyle.scale     = 0.0
-        pnt.style = style
-
-        pnt.region                    = simplekml.Region()
-        pnt.region.lod.minlodpixels  = 1
-        pnt.region.lod.maxlodpixels  = -1
-
-        if eff:
-            p['eff'] = eff
-
-    kml.save(OUTPUT_KML)
-    print(f"✅ KML salvato: {OUTPUT_KML}")
-    esporta_kmz(OUTPUT_KML, OUTPUT_KMZ)
+    # 7. Calcolo efficienza per ogni pannello
+    if HAS_EFFICIENCY and eff_params:
+        print(f"\n{'─'*60}")
+        print("  Calcolo efficienza per ogni pannello...")
+        for p in final_panels:
+            t_hot = p.get('t_panel')
+            if t_hot is None:
+                # Fallback basato sulla classe: danneggiato simula +15°C hotspot
+                if p.get('class_id') == 0:
+                    t_hot = eff_params['t_sano'] + 15.0
+                else:
+                    t_hot = eff_params['t_sano']
+            try:
+                p['eff'] = calcola_diagnostica_dict(t_hot, p.get('area_m2', 1.6), eff_params)
+            except Exception as e:
+                print(f"  ⚠️  Errore calcolo efficienza pannello: {e}")
+                p['eff'] = {}
 
     # 8. CSV
     esporta_csv(final_panels, OUTPUT_CSV)
 
-    # 9. GeoJSON
-    esporta_geojson(final_panels, OUTPUT_GEOJSON)
-
-    # 10. Mosaico annotato
+    # 10. Mosaici annotati (tutti i pannelli + solo danneggiati)
     if os.path.exists(ORIGINAL_MOSAIC_PATH):
         try:
-            mosaico = cv2.imread(ORIGINAL_MOSAIC_PATH)
-            if mosaico is not None:
-                pannelli_disegnati = 0
+            mosaico_base = cv2.imread(ORIGINAL_MOSAIC_PATH)
+            if mosaico_base is not None:
+                mosaico_all = mosaico_base.copy()
+                mosaico_dmg = mosaico_base.copy()
+                cnt_all = 0
+                cnt_dmg = 0
+
+                font       = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.5
+                thickness  = 1
+
                 for idx, p in enumerate(final_panels):
                     if p['score'] < SCORE_MIN_DRAW_MOSAIC:
                         continue
@@ -634,45 +559,47 @@ def main():
                     color       = CLASS_COLORS.get(class_id, (0, 200, 0))
                     cx, cy      = int(p['gx']), int(p['gy'])
 
-                    if p.get('contour') is not None:
-                        cv2.drawContours(mosaico, [p['contour']], -1, color, 3)
+                    eff_pct = p.get('eff', {}).get('eta_hotspot_pct')
+                    if eff_pct is not None:
+                        label = f"#{idx+1} η={eff_pct:.1f}%"
                     else:
-                        cv2.circle(mosaico, (cx, cy), DOT_RADIUS_MOSAIC, color, -1)
+                        label = (f"#{idx+1} DANN."
+                                 if classe_nome == "Pannello Danneggiato"
+                                 else f"#{idx+1} SANO")
 
-                    if classe_nome == "Pannello Danneggiato":
-                        label = f"#{idx+1} DANNEGGIATO {p['score']:.0%}"
-                    else:
-                        label = f"#{idx+1} SANO {p['score']:.0%}"
+                    def _draw_panel(canvas, box_pts, cx, cy, color, label):
+                        if box_pts is not None:
+                            cv2.drawContours(canvas, [box_pts], 0, color, 3)
+                        else:
+                            cv2.circle(canvas, (cx, cy), DOT_RADIUS_MOSAIC, color, -1)
+                        (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+                        tx = max(0, cx - tw // 2)
+                        ty = max(th + 4, cy - 14)
+                        cv2.rectangle(canvas, (tx-2, ty-th-2), (tx+tw+2, ty+2), (0, 0, 0), -1)
+                        cv2.putText(canvas, label, (tx, ty),
+                                    font, font_scale, color, thickness, cv2.LINE_AA)
 
-                    font       = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 0.5
-                    thickness  = 1
-                    (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+                    # Mosaico completo (tutti)
+                    _draw_panel(mosaico_all, p.get('box_pts'), cx, cy, color, label)
+                    cnt_all += 1
 
-                    tx = max(0, cx - tw // 2)
-                    ty = max(th + 4, cy - 14)
-                    cv2.rectangle(mosaico,
-                                  (tx - 2, ty - th - 2),
-                                  (tx + tw + 2, ty + 2),
-                                  (0, 0, 0), -1)
-                    cv2.putText(mosaico, label, (tx, ty),
-                                font, font_scale, color, thickness, cv2.LINE_AA)
+                    # Mosaico solo danneggiati
+                    if class_id == 0:
+                        _draw_panel(mosaico_dmg, p.get('box_pts'), cx, cy, color, label)
+                        cnt_dmg += 1
 
-                    pannelli_disegnati += 1
-
-                cv2.imwrite(OUTPUT_MOSAIC_MARKED, mosaico)
-                print(f"✅ Mosaico salvato: {OUTPUT_MOSAIC_MARKED} ({pannelli_disegnati} pannelli disegnati, score≥{SCORE_MIN_DRAW_MOSAIC:.0%})")
+                cv2.imwrite(OUTPUT_MOSAIC_MARKED,  mosaico_all)
+                cv2.imwrite(OUTPUT_MOSAIC_DAMAGED, mosaico_dmg)
+                print(f"✅ Mosaico completo: {OUTPUT_MOSAIC_MARKED}  ({cnt_all} pannelli)")
+                print(f"✅ Mosaico danneggiati: {OUTPUT_MOSAIC_DAMAGED}  ({cnt_dmg} pannelli)")
         except Exception as e:
             print(f"⚠️  Errore mosaico: {e}")
 
     print(f"\n🎯 PANNELLI SOLARI RILEVATI: {len(final_panels)}")
     print(f"📁 Output generati:")
-    print(f"   - {OUTPUT_KML}")
-    print(f"   - {OUTPUT_KMZ}")
     print(f"   - {OUTPUT_CSV}")
-    print(f"   - {OUTPUT_GEOJSON}")
-    print(f"   - {OUTPUT_MOSAIC_MARKED}")
-    print(f"   - {VIS_OUTPUT_DIR}/ (patch annotate)")
+    print(f"   - {OUTPUT_MOSAIC_MARKED}  (tutti i pannelli)")
+    print(f"   - {OUTPUT_MOSAIC_DAMAGED}  (solo danneggiati)")
     print("🎯 PROCEDURA COMPLETATA.\n")
 
 

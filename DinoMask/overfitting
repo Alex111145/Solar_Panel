@@ -1,0 +1,48 @@
+grep "segm/AP" /workspace/cortoswin/metrics.json | python3 -c "
+import sys, json
+print(f'| Iter   | AP Total | AP50  | AP75  | AP95  | APs   | APm   | APl   | Loss   |')
+print('|' + '-'*8 + '|' + '-'*10 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*8 + '|')
+
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        it   = d.get('iteration', '?')
+        ap   = d.get('segm/AP', 0)
+        ap50 = d.get('segm/AP50', 0)
+        ap75 = d.get('segm/AP75', 0) # Solitamente presente nei log Detectron2
+        ap95 = d.get('segm/AP95', 0) # Nota: se non estratto da COCO, apparirà 0.00
+        aps  = d.get('segm/APs', 0)
+        apm  = d.get('segm/APm', 0)
+        apl  = d.get('segm/APl', 0)
+        loss = d.get('total_loss', 0)
+        
+        print(f'| {it:6} | {ap:8.2f}% | {ap50:5.2f}% | {ap75:5.2f}% | {ap95:5.2f}% | {aps:5.2f}% | {apm:5.2f}% | {apl:5.2f}% | {loss:.4f} |')
+    except:
+        continue
+"
+
+
+
+
+grep "segm/AP" /workspace/cortor50/metrics.json | python3 -c "
+import sys, json
+print(f'| Iter   | AP Total | AP50  | AP75  | AP95  | APs   | APm   | APl   | Loss   |')
+print('|' + '-'*8 + '|' + '-'*10 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*7 + '|' + '-'*8 + '|')
+
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        it   = d.get('iteration', '?')
+        ap   = d.get('segm/AP', 0)
+        ap50 = d.get('segm/AP50', 0)
+        ap75 = d.get('segm/AP75', 0) # Solitamente presente nei log Detectron2
+        ap95 = d.get('segm/AP95', 0) # Nota: se non estratto da COCO, apparirà 0.00
+        aps  = d.get('segm/APs', 0)
+        apm  = d.get('segm/APm', 0)
+        apl  = d.get('segm/APl', 0)
+        loss = d.get('total_loss', 0)
+        
+        print(f'| {it:6} | {ap:8.2f}% | {ap50:5.2f}% | {ap75:5.2f}% | {ap95:5.2f}% | {aps:5.2f}% | {apm:5.2f}% | {apl:5.2f}% | {loss:.4f} |')
+    except:
+        continue
+"

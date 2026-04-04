@@ -77,46 +77,72 @@ def _parse_xmp_dji(photo_path: str) -> Optional[dict]:
         return None
 
 
+def _dms_to_decimal(dms, ref: str) -> float:
+    """Converte GPS DMS (tuple PIL) in gradi decimali."""
+    d, m, s = dms
+    dec = float(d) + float(m) / 60.0 + float(s) / 3600.0
+    if ref in ('S', 'W'):
+        dec = -dec
+    return dec
+
+
 def _read_gps_exif(photo_path: str) -> Optional[dict]:
     """
-    Legge GPS e metadati di volo da EXIF tramite exiftool.
-    Se exiftool non trova il GPS, prova il parsing XMP DJI diretto.
+    Legge GPS e metadati di volo dall'EXIF tramite PIL (senza exiftool).
+    Strategia:
+      1. XMP DJI (drone-dji:GpsLatitude) — presente in alcuni RJPEG
+      2. EXIF standard GPSInfo via PIL._getexif() — DMS → decimale
     """
-    # Prima prova: XMP DJI (più affidabile per file RJPEG/MPO DJI)
+    # Strategia 1: XMP DJI
     result_xmp = _parse_xmp_dji(photo_path)
     if result_xmp:
         return result_xmp
 
-    # Seconda prova: exiftool campi standard
+    # Strategia 2: EXIF GPS via PIL (nessuna dipendenza esterna)
     try:
-        result = subprocess.run(
-            ["exiftool", "-j", "-n",
-             "-GPSLatitude", "-GPSLongitude", "-RelativeAltitude",
-             "-GPSAltitude", "-HFOV", "-VFOV",
-             photo_path],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode != 0 or not result.stdout.strip():
+        from PIL import Image
+        from PIL.ExifTags import TAGS, GPSTAGS
+
+        img  = Image.open(photo_path)
+        exif = img._getexif()
+        if not exif:
             return None
 
-        data = json.loads(result.stdout)[0]
-        lat = data.get("GPSLatitude")
-        lon = data.get("GPSLongitude")
-        if lat is None or lon is None:
+        # Trova il blocco GPSInfo
+        gps_info = None
+        for tag_id, val in exif.items():
+            if TAGS.get(tag_id) == "GPSInfo":
+                gps_info = {GPSTAGS.get(k, k): v for k, v in val.items()}
+                break
+
+        if not gps_info:
             return None
 
-        alt = abs(float(data.get("RelativeAltitude",
-                                  data.get("GPSAltitude", H30T_ALT_DEFAULT))))
+        lat_dms = gps_info.get("GPSLatitude")
+        lat_ref = gps_info.get("GPSLatitudeRef", "N")
+        lon_dms = gps_info.get("GPSLongitude")
+        lon_ref = gps_info.get("GPSLongitudeRef", "E")
+
+        if not lat_dms or not lon_dms:
+            return None
+
+        lat = _dms_to_decimal(lat_dms, lat_ref)
+        lon = _dms_to_decimal(lon_dms, lon_ref)
+
+        # Altitudine: usa GPSAltitude (ASL) come approssimazione AGL
+        # DJI vola tipicamente a 20-50m AGL — se ASL > 100m clip a default
+        alt_asl = float(gps_info.get("GPSAltitude", H30T_ALT_DEFAULT))
+        alt = alt_asl if alt_asl <= 80.0 else H30T_ALT_DEFAULT
+
         return {
-            "lat":       float(lat),
-            "lon":       float(lon),
+            "lat":       lat,
+            "lon":       lon,
             "alt_m":     alt,
-            "fov_h_deg": float(data.get("HFOV", H30T_HFOV_DEG)),
-            "fov_v_deg": float(data.get("VFOV", H30T_VFOV_DEG)),
+            "fov_h_deg": H30T_HFOV_DEG,
+            "fov_v_deg": H30T_VFOV_DEG,
         }
 
-    except (subprocess.TimeoutExpired, FileNotFoundError,
-            json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except Exception:
         return None
 
 
@@ -342,14 +368,34 @@ def panel_pixel_in_photo(panel_lat: float, panel_lon: float,
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 4:
-        print("Uso: python photo_matcher.py <cartella_drone> <lat> <lon>")
+    if len(sys.argv) < 2:
+        print("Uso: python photo_matcher.py <cartella_drone> [lat] [lon]")
         print("Esempio: python photo_matcher.py ./foto_drone 45.1234 9.5678")
         sys.exit(0)
 
     folder = sys.argv[1]
-    lat    = float(sys.argv[2])
-    lon    = float(sys.argv[3])
+
+    # Solo scansione se lat/lon non fornite
+    if len(sys.argv) < 4:
+        print(f"\n{'='*55}")
+        print(f"  SCANSIONE CARTELLA: {folder}")
+        print(f"{'='*55}")
+        idx = load_drone_photos_index(folder)
+        if not idx:
+            print("  ❌ Nessuna foto con GPS trovata")
+            sys.exit(1)
+        print(f"\n  Prime 5 foto indicizzate:")
+        for e in idx[:5]:
+            print(f"  {os.path.basename(e['path'])}")
+            print(f"    GPS: {e['lat']:.6f}, {e['lon']:.6f}  |  Alt: {e['alt_m']:.1f} m")
+            fp = e['footprint']
+            print(f"    Footprint: {fp['w_m']:.1f} m × {fp['h_m']:.1f} m")
+        print(f"\n  Riesegui con: python photo_matcher.py {folder} {idx[0]['lat']:.6f} {idx[0]['lon']:.6f}")
+        print(f"{'='*55}\n")
+        sys.exit(0)
+
+    lat = float(sys.argv[2])
+    lon = float(sys.argv[3])
 
     print(f"\n{'='*55}")
     print(f"  Ricerca foto per pannello GPS ({lat:.6f}, {lon:.6f})")

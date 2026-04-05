@@ -70,6 +70,7 @@ except ImportError:
 # ==============================================================================
 BASE_DIR            = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR          = "/workspace/cortoswin"                         # cartella pesi training
+WEIGHTS_PATH_OVERRIDE = os.path.join(os.path.dirname(BASE_DIR), "model_0001999.pth")
 DATASET_FOLDER_NAME = "solar_datasets_nuoveannotazioni"
 
 VAL_IMGS             = os.path.join(BASE_DIR, "inferenza_patches")   # patch tagliate per inferenza
@@ -84,13 +85,15 @@ OUTPUT_CSV            = os.path.join(BASE_DIR, "Rilevamenti_Pannelli.csv")
 YAML_CONFIG = os.path.join(BASE_DIR, "configs", "coco", "instance-segmentation", "swin", "maskdino_swinl_bs16_50ep.yaml")
 NUM_CLASSES = 2  # Pannello Danneggiato + Pannello Sano
 
-SOGLIA_DETECTION       = 0.50
+SOGLIA_DETECTION       = 0.55
 NMS_THRESH             = 0.40
 MERGE_DIST_METERS      = 3
 DOT_RADIUS_MOSAIC      = 8
 BOOST                  = 2.5
-SCORE_MIN_EXPORT       = 0.5
-SCORE_MIN_DRAW_MOSAIC  = 0.70   # soglia minima per disegnare sul mosaico
+SCORE_MIN_EXPORT       = 0.55
+SCORE_MIN_DRAW_MOSAIC  = 0.65   # soglia minima per disegnare sul mosaico
+AREA_MIN_DRAW_M2       = 0.4    # scarta falsi positivi piccoli (< 0.4 m²)
+ASPECT_RATIO_MAX       = 5.0    # rapporto lati massimo (pannelli ≤ 5:1)
 
 # Nuove Classi e Colori (BGR): sano=verde, danneggiato=rosso
 CLASS_NAMES = {0: "Pannello Danneggiato", 1: "Pannello Sano"}
@@ -262,7 +265,12 @@ def main():
     print("="*60)
 
     # 1. Setup modello
-    weights_path = get_best_weights(OUTPUT_DIR)
+    if os.path.exists(WEIGHTS_PATH_OVERRIDE):
+        weights_path = WEIGHTS_PATH_OVERRIDE
+        size = os.path.getsize(weights_path) / 1e6
+        print(f"✅ Modello: {os.path.basename(weights_path)} ({size:.1f} MB)")
+    else:
+        weights_path = get_best_weights(OUTPUT_DIR)
     cfg          = setup_cfg(weights_path)
     predictor    = DefaultPredictor(cfg)
 
@@ -393,8 +401,18 @@ def main():
                 contours    = [c for c in contours if cv2.contourArea(c) > 200]
 
                 global_box_pts = None
+                contour_local  = None
                 if contours:
                     c_big = max(contours, key=cv2.contourArea)
+
+                    # Filtro aspect ratio: scarta oggetti troppo allungati o quadrati anomali
+                    rect     = cv2.minAreaRect(c_big)
+                    rw, rh   = rect[1]
+                    if min(rw, rh) > 0:
+                        ar = max(rw, rh) / min(rw, rh)
+                        if ar > ASPECT_RATIO_MAX:
+                            continue   # non è un pannello
+
                     M = cv2.moments(c_big)
                     if M["m00"] != 0:
                         cx_local = int(M["m10"] / M["m00"])
@@ -402,12 +420,12 @@ def main():
                     else:
                         cx_local = int((boxes[k][0] + boxes[k][2]) / 2)
                         cy_local = int((boxes[k][1] + boxes[k][3]) / 2)
-                    # rettangolo ruotato in coordinate locali → tradotto in globali
-                    rect      = cv2.minAreaRect(c_big)
-                    local_box = np.int32(cv2.boxPoints(rect))
+
+                    local_box      = np.int32(cv2.boxPoints(rect))
                     global_box_pts = local_box.copy()
                     global_box_pts[:, 0] += off_x
                     global_box_pts[:, 1] += off_y
+                    contour_local  = c_big   # contorno in coordinate patch locale
                 else:
                     cx_local = int((boxes[k][0] + boxes[k][2]) / 2)
                     cy_local = int((boxes[k][1] + boxes[k][3]) / 2)
@@ -423,25 +441,48 @@ def main():
                 if HAS_THERMAL and HAS_MATCHER and photo_index:
                     best_photo = find_best_photo(lat, lon, photo_index)
                     if best_photo:
-                        # Usa coordinate GPS per il mapping pixel nella foto termica —
-                        # più accurato dell'offset pixel ortomosaico→drone.
-                        mode    = "max" if class_id_k == 0 else "mean"
-                        t_panel = extract_at_gps(
-                            best_photo, lat, lon, mode=mode
-                        )
+                        # Modalità estrazione: max hotspot per danneggiato, media per sano
+                        mode_t = "max" if class_id_k == 0 else "mean"
+
+                        # Stima raggio termica dalla dimensione della mask nell'ortomosaico:
+                        # area_mask [m²] → raggio equivalente nel sensore termico (~5cm/px)
                         n_px    = int(np.sum(patch_mask))
                         area_m2 = pixels_to_area_m2(n_px, gsd_m)
+                        drone_gsd_est = 0.05   # ~5cm/px DJI H30T a 30m
+                        r_thermal = max(10, int(
+                            math.sqrt((n_px * gsd_m**2) / math.pi) / drone_gsd_est
+                        ))
+                        r_thermal = min(r_thermal, 45)  # cap massimo
+
+                        # Interroga SDK per temperatura usando la posizione GPS del centroide
+                        t_panel = extract_at_gps(
+                            best_photo, lat, lon,
+                            mode=mode_t,
+                            radius_px=r_thermal,
+                        )
+
+                        # [DEBUG] Stampa di controllo pannello ↔ foto drone
+                        classe_debug = CLASS_NAMES.get(class_id_k, "?")
+                        t_label = "T_max" if class_id_k == 0 else "T_media"
+                        t_str   = f"{t_panel:.1f} °C" if t_panel is not None else "N/D"
+                        print(f"  [DEBUG] Pannello #{len(raw_detections)+1} ({classe_debug}) "
+                              f"GPS ({lat:.6f}, {lon:.6f}) → "
+                              f"foto: {os.path.basename(best_photo)} | "
+                              f"{t_label}={t_str}  r={r_thermal}px")
+
 
                 raw_detections.append({
-                    'lat':      lat,
-                    'lon':      lon,
-                    'gx':       gx,
-                    'gy':       gy,
-                    'score':    float(scores[k]),
-                    'class_id': class_id_k,
-                    'area_m2':  area_m2,
-                    'box_pts':  global_box_pts,
-                    't_panel':  t_panel,
+                    'lat':           lat,
+                    'lon':           lon,
+                    'gx':            gx,
+                    'gy':            gy,
+                    'score':         float(scores[k]),
+                    'class_id':      class_id_k,
+                    'area_m2':       area_m2,
+                    'box_pts':       global_box_pts,
+                    't_panel':       t_panel,
+                    'patch_path':    path,            # patch originale (per debug)
+                    'contour_local': contour_local,   # contorno in coord patch (per debug)
                 })
 
     print(f"\n{'─'*60}")
@@ -490,30 +531,35 @@ def main():
 
     print(f"🔄 Fusione duplicati (soglia: {merge_dist} m)...")
     final_panels = filtra_punti_unici(raw_detections, merge_dist)
-    prima = len(final_panels)
+    dopo_merge = len(final_panels)
+    print(f"  Dopo merge: {dopo_merge}")
+
+    # Filtro score
+    final_panels = [p for p in final_panels if p['score'] >= SCORE_MIN_EXPORT]
+    print(f"  Dopo filtro score >= {SCORE_MIN_EXPORT}: {len(final_panels)}")
+
+    # Filtro area: scarta solo i veri falsi positivi (<0.1 m²)
+    # None area viene tenuta (foto drone non disponibile non è motivo di scarto)
     final_panels = [p for p in final_panels
-                    if p['score'] >= SCORE_MIN_EXPORT
-                    and (p.get('area_m2') or 0) >= 1.0]
-    scartati = prima - len(final_panels)
-    if scartati > 0:
-        print(f"  Scartati (area < 1 m² = falsi positivi): {scartati}")
+                    if p.get('area_m2') is None or p.get('area_m2', 0) >= 0.1]
+    print(f"  Dopo filtro area >= 0.1 m² (None=tenuto): {len(final_panels)}")
     print(f"  Pannelli unici finali: {len(final_panels)}")
 
     # T_sano: calcolato dopo il merge (serve final_panels)
+    t_sano_is_fallback = False
     if eff_params is not None:
         temp_sani = [
             p['t_panel'] for p in final_panels
             if p.get('class_id') == 1 and p.get('t_panel') is not None
         ]
         if temp_sani:
-            # Pannello sano più CALDO = baseline 100% nelle condizioni di campo attuali.
-            # Pannelli più caldi ancora (hotspot) sono per definizione degradati → SOH < 100%
             eff_params['t_sano'] = max(temp_sani)
             print(f"  T_sano baseline (sano più caldo): {eff_params['t_sano']:.1f} °C  "
                   f"[su {len(temp_sani)} pannelli sani]")
         elif eff_params.get('t_sano') is None:
             eff_params['t_sano'] = t_amb_drone + 10.0
-            print(f"  ⚠️  T_sano non trovata — uso fallback: {eff_params['t_sano']:.1f} °C")
+            t_sano_is_fallback   = True
+            print(f"  ⚠️  T_sano non trovata — fallback: {eff_params['t_sano']:.1f} °C  [!! sul mosaico]")
 
     # 7. Calcolo efficienza per ogni pannello
     if HAS_EFFICIENCY and eff_params:
@@ -550,9 +596,15 @@ def main():
                 font_scale = 0.5
                 thickness  = 1
 
+                da_disegnare = sum(1 for p in final_panels if p['score'] >= SCORE_MIN_DRAW_MOSAIC)
+                print(f"  Da disegnare sul mosaico (score >= {SCORE_MIN_DRAW_MOSAIC}): {da_disegnare}/{len(final_panels)}")
+
                 for idx, p in enumerate(final_panels):
                     if p['score'] < SCORE_MIN_DRAW_MOSAIC:
                         continue
+                    if (p.get('area_m2') is not None and
+                            p.get('area_m2', 0) < AREA_MIN_DRAW_M2):
+                        continue   # scarta falsi positivi piccoli
 
                     class_id    = p.get('class_id', 1)
                     classe_nome = CLASS_NAMES.get(class_id, "Pannello Sano")
@@ -560,12 +612,14 @@ def main():
                     cx, cy      = int(p['gx']), int(p['gy'])
 
                     eff_pct = p.get('eff', {}).get('eta_hotspot_pct')
+                    warn    = " !!" if t_sano_is_fallback else ""
                     if eff_pct is not None:
-                        label = f"#{idx+1} η={eff_pct:.1f}%"
+                        label = f"#{idx+1} η={eff_pct:.1f}%{warn}"
                     else:
-                        label = (f"#{idx+1} DANN."
-                                 if classe_nome == "Pannello Danneggiato"
-                                 else f"#{idx+1} SANO")
+                        if classe_nome == "Pannello Danneggiato":
+                            label = f"#{idx+1} DANN.{warn}"
+                        else:
+                            label = f"#{idx+1} SANO"
 
                     def _draw_panel(canvas, box_pts, cx, cy, color, label):
                         if box_pts is not None:
@@ -594,6 +648,70 @@ def main():
                 print(f"✅ Mosaico danneggiati: {OUTPUT_MOSAIC_DAMAGED}  ({cnt_dmg} pannelli)")
         except Exception as e:
             print(f"⚠️  Errore mosaico: {e}")
+
+    # ── DEBUG PATCH post-mosaico (prime 5) ──────────────────────────────────────
+    # Usa la patch originale del mosaico: la mask è già nelle coordinate giuste
+    print(f"\n{'─'*60}")
+    print("  📸 Generazione immagini debug su patch (prime 5)...")
+    dbg_count = 0
+    for p_d in final_panels:
+        if dbg_count >= 5:
+            break
+        if p_d['score'] < SCORE_MIN_DRAW_MOSAIC:
+            continue
+        patch_p  = p_d.get('patch_path')
+        cnt_loc  = p_d.get('contour_local')
+        if patch_p is None or cnt_loc is None or not os.path.exists(patch_p):
+            continue
+
+        try:
+            patch_img = cv2.imread(patch_p)
+            if patch_img is None:
+                continue
+
+            cid_d   = p_d.get('class_id', 1)
+            color_d = CLASS_COLORS.get(cid_d, (0, 200, 0))
+
+            # Fill semi-trasparente con il contorno della mask AI
+            overlay = patch_img.copy()
+            cv2.fillPoly(overlay, [cnt_loc], color_d)
+            cv2.addWeighted(overlay, 0.30, patch_img, 0.70, 0, patch_img)
+            cv2.polylines(patch_img, [cnt_loc], True, color_d, 2)
+
+            # Centroide
+            M = cv2.moments(cnt_loc)
+            if M["m00"] != 0:
+                cx_d = int(M["m10"] / M["m00"])
+                cy_d = int(M["m01"] / M["m00"])
+            else:
+                cx_d = patch_img.shape[1] // 2
+                cy_d = patch_img.shape[0] // 2
+            cv2.circle(patch_img, (cx_d, cy_d), 3, (255, 255, 255), -1)
+
+            # Temperatura
+            t_val  = p_d.get('t_panel')
+            t_s    = f"{t_val:.1f}C" if t_val is not None else "N/D"
+            nome_d = "DANN." if cid_d == 0 else "SANO"
+            eff_d  = p_d.get('eff', {}).get('eta_hotspot_pct')
+            if eff_d is not None:
+                lbl = f"#{dbg_count+1} {nome_d} η={eff_d:.1f}% T={t_s}"
+            else:
+                lbl = f"#{dbg_count+1} {nome_d} T={t_s}"
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            (tw, th_), _ = cv2.getTextSize(lbl, font, 0.55, 2)
+            lx = max(2, cx_d - tw // 2)
+            ly = max(th_ + 4, cy_d - 20)
+            cv2.rectangle(patch_img, (lx-2, ly-th_-4), (lx+tw+2, ly+4), (0, 0, 0), -1)
+            cv2.putText(patch_img, lbl, (lx, ly), font, 0.55, color_d, 2, cv2.LINE_AA)
+
+            dbg_count += 1
+            out_d = os.path.join(BASE_DIR, f"debug_patch_{dbg_count:02d}.jpg")
+            cv2.imwrite(out_d, patch_img)
+            print(f"  📸 [{dbg_count}/5] {out_d}")
+
+        except Exception as e:
+            print(f"  ⚠️  Debug patch {dbg_count+1}: {e}")
 
     print(f"\n🎯 PANNELLI SOLARI RILEVATI: {len(final_panels)}")
     print(f"📁 Output generati:")

@@ -92,4 +92,17 @@ Lancia il training su 2 GPU (es. ID 0 e 1):
 CUDA_VISIBLE_DEVICES=0,1 python -W ignore train.py
 ```
 
+
+
+
+per scaricare in locale
+
+scp -P 13564 -i "C:\Users\dell\.ssh\id_runpod_key" root@103.207.149.110:/workspace/cortoswin/model_0001999.pth "F:\pesifinali\"; scp -P 13564 -i "C:\Users\dell\.ssh\id_runpod_key" root@103.207.149.110:/workspace/cortoswin/metrics_all.csv "F:\pesifinali\"; scp -P 13564 -i "C:\Users\dell\.ssh\id_runpod_key" root@103.207.149.110:/workspace/cortoswin/config_used.yaml "F:\pesifinali"
+
+
+
+
+
+
+
 ---
